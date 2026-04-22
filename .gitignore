@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+
+# Local/temporary outputs
+*.log
+*.tmp
+tmp/
+
+# Project datasets and generated artifacts (keep local; do not commit)
+data/*
+!data/.gitkeep
+!data/README.md
+data/MP_cifs/
+data/MP_cifs.zip
+Graphlets/*
+!Graphlets/.gitkeep
+!Graphlets/README.md
+ICSD_Features/
+
+# Never commit CIF structure files
+*.cif
+*.CIF
