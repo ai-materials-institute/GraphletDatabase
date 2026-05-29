@@ -26,8 +26,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/aadityapanigrahi/graphlet-featurization"
-Issues = "https://github.com/aadityapanigrahi/graphlet-featurization/issues"
+Homepage = "https://github.com/aadityapanigrahi/GraphletDatabase"
+Issues = "https://github.com/aadityapanigrahi/GraphletDatabase/issues"
 dependencies = [
   "mendeleev",
   "numpy",
