@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graphlet-featurization"
+version = "0.1.0"
+description = "Graphlet-based crystal structure featurization utilities for CIF files."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "Aaditya Panigrahi", email = "aadityaapanigrahi@gmail.com"},
+]
+keywords = ["materials-science", "cif", "graphlets", "featurization", "earth-mover-distance"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://github.com/aadityapanigrahi/graphlet-featurization"
+Issues = "https://github.com/aadityapanigrahi/graphlet-featurization/issues"
+dependencies = [
+  "mendeleev",
+  "numpy",
+  "pot",
+  "pymatgen",
+  "scipy",
+  "torch",
+]
+
+[project.scripts]
+graphlet-featurization = "cli:main"
+graphlet-pipeline = "cli:pipeline_main"
+graphlet-build-folder = "cli:build_folder_main"
+graphlet-build-csv = "cli:build_csv_main"
+graphlet-compact-workflow = "cli:compact_main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["graphlets", "core", "emd", "cli"]

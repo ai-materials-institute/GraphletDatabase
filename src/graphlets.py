@@ -30,24 +30,13 @@ Author
 Krishnanada Mallaya, Yanjun Liu
 """
 
+import re
+from collections import Counter, defaultdict
+
 import numpy as np
 from pymatgen.analysis.local_env import VoronoiNN
-
 from pymatgen.core import Structure
-from pymatgen.io.cif import CifParser
-import matplotlib.pyplot as plt
-import re
-from scipy.stats import skew, kurtosis
-from collections import defaultdict
-
-# Use SpacegroupAnalyzer to get symmetry information
-from pymatgen.symmetry.analyzer import SpacegroupAnalyzer, PointGroupAnalyzer
-from pymatgen.core.structure import Molecule
-import pandas as pd
-
-import seaborn as sns
-import matplotlib.pyplot as plt
-from collections import Counter
+from scipy.stats import kurtosis, skew
 
 
 class Create_Graphlets:
@@ -90,6 +79,27 @@ class Create_Graphlets:
     """
      
     def __init__(self, cif_structure,atomic_radii=None,min_voronoi_weight=1e-2):
+        """
+        Initialize graphlet extraction from a structure and optional radii.
+
+        The structure is reduced to its primitive cell and neighbor data is
+        computed immediately for later 1-, 2-, and 3-site graphlet generation.
+
+        Parameters
+        ----------
+        cif_structure : pymatgen.core.Structure
+            Structure to featurize.
+        atomic_radii : dict or None, optional
+            Mapping from element symbol to atomic radius in picometers. If
+            None, radii are loaded from ``mendeleev``.
+        min_voronoi_weight : float, optional
+            Minimum Voronoi face weight used to keep neighbor contacts.
+            Default is ``1e-2``.
+
+        Returns
+        -------
+        None
+        """
         prim_structure=cif_structure.get_primitive_structure() # so we only worry about the smallest unit cell
         self.structure = prim_structure
         self.min_voronoi_weight = float(min_voronoi_weight)
@@ -262,8 +272,13 @@ class Create_Graphlets:
         -----
         For each unique site composition, a graphlet is created with a count.
 
-        Sets
-        ----
+        Returns
+        -------
+        None
+            Results are stored on ``self.one_site_graphlets``.
+
+        Attributes
+        ----------
         self.one_site_graphlets : list of dict
             Populated with 1-site graphlet records.
         """
@@ -300,8 +315,13 @@ class Create_Graphlets:
         compositions, the distance, and the aggregated count keyed by
         (sorted labels, rounded distance).
 
-        Sets
-        ----
+        Returns
+        -------
+        None
+            Results are stored on ``self.two_site_graphlets``.
+
+        Attributes
+        ----------
         self.two_site_graphlets : list of dict
             Populated with 2-site graphlet records.
         """
@@ -353,8 +373,13 @@ class Create_Graphlets:
         are sorted. A coarse angle bucket (round(angle_jk / 10) * 10) is
         used in the triplet key. Counts are aggregated over unique keys.
 
-        Sets
-        ----
+        Returns
+        -------
+        None
+            Results are stored on ``self.three_site_graphlets``.
+
+        Attributes
+        ----------
         self.three_site_graphlets : list of dict
             Populated with 3-site graphlet records.
         """
@@ -486,11 +511,19 @@ class Create_Graphlets:
             Mapping element symbol -> dict of scalar properties.
             Example: {'Fe': {'Z': 26, 'radius': 126, ...}, ...}
 
-        Sets
-        ----
+        Returns
+        -------
+        None
+            Results are stored on graphlet feature attributes.
+
+        Attributes
+        ----------
         self.one_site_features : dict
+            One-site feature values by feature name, when available.
         self.two_site_features : dict
+            Two-site feature values by feature name, when available.
         self.three_site_features : dict
+            Three-site feature values by feature name, when available.
         """
         feat_names=list(list(atomic_features_dict.values())[0].keys())     
 
@@ -636,6 +669,17 @@ class Create_Graphlets:
     def _to_builtin(obj):
         """
         Recursively convert numpy-heavy objects to JSON-safe Python types.
+
+        Parameters
+        ----------
+        obj : object
+            Object that may contain numpy arrays or numpy scalar values.
+
+        Returns
+        -------
+        object
+            Equivalent object composed of JSON-serializable Python containers
+            and scalar values where possible.
         """
         if isinstance(obj, dict):
             return {k: Create_Graphlets._to_builtin(v) for k, v in obj.items()}
@@ -650,6 +694,17 @@ class Create_Graphlets:
     def _build_metadata(self, cif_path=None):
         """
         Build a compact metadata block for structure-level JSON payloads.
+
+        Parameters
+        ----------
+        cif_path : str or None, optional
+            Optional source CIF path to include in the metadata.
+
+        Returns
+        -------
+        dict
+            Metadata containing reduced formula, lattice parameters, site
+            count, and optionally the source CIF path.
         """
         metadata = {
             "reduced_formula": self.structure.composition.reduced_formula,
@@ -686,6 +741,16 @@ class Create_Graphlets:
     def get_features_dict(self, max_order=3):
         """
         Return merged feature dictionaries up to the requested graphlet order.
+
+        Parameters
+        ----------
+        max_order : int, optional
+            Highest graphlet order to include. Default is 3.
+
+        Returns
+        -------
+        dict
+            Merged raw feature lists keyed by feature name.
         """
         features_dict = {**getattr(self, "one_site_features", {})}
         if max_order >= 2:
@@ -697,6 +762,16 @@ class Create_Graphlets:
     def get_feature_groups(self, max_order=3):
         """
         Return raw feature dictionaries grouped by graphlet order.
+
+        Parameters
+        ----------
+        max_order : int, optional
+            Highest graphlet order to include. Default is 3.
+
+        Returns
+        -------
+        dict
+            JSON-safe feature dictionaries grouped by graphlet order.
         """
         feature_groups = {
             "one_site_features": getattr(self, "one_site_features", {}),
@@ -710,8 +785,32 @@ class Create_Graphlets:
     def get_feature_counts(self, max_order=3):
         """
         Return compact value-frequency feature dictionaries grouped by order.
+
+        Parameters
+        ----------
+        max_order : int, optional
+            Highest graphlet order to include. Default is 3.
+
+        Returns
+        -------
+        dict
+            Feature dictionaries grouped by graphlet order. Each feature is
+            represented by sorted ``(value, count)`` pairs.
         """
         def feature_to_counts_float(feat_list):
+            """
+            Convert one feature value list into sorted value-count pairs.
+
+            Parameters
+            ----------
+            feat_list : list
+                Raw scalar feature values.
+
+            Returns
+            -------
+            list of tuple
+                Sorted ``(value, count)`` pairs.
+            """
             counts = Counter(float(self._to_builtin(v)) for v in feat_list)
             return sorted([(val, freq) for val, freq in counts.items()], key=lambda x: x[0])
 
@@ -750,6 +849,11 @@ class Create_Graphlets:
         -------
         dict
             JSON-ready structure payload.
+
+        Raises
+        ------
+        ValueError
+            If ``feature_mode`` is neither ``"counts"`` nor ``"raw"``.
         """
         payload = {"metadata": self._build_metadata(cif_path=cif_path)}
 
@@ -810,6 +914,12 @@ class Create_Graphlets:
         -------
         dict
             JSON-ready histogram payload for a single structure.
+
+        Raises
+        ------
+        ValueError
+            If fixed-bin mode is requested without bin centers and feature
+            names, or if ``mode`` is not supported.
         """
         graphlet_list = [self]
         if mode == "dynamic":
@@ -865,6 +975,24 @@ class Graphlet_Analyzer:
         If True, histograms are normalized to density. Default is False.
     """
     def __init__(self, graphlet_list,max_order=3,bin_width_factor=1.0,hist_density=False):
+        """
+        Store graphlet samples and histogram configuration.
+
+        Parameters
+        ----------
+        graphlet_list : list
+            List of ``Create_Graphlets`` objects, one per material.
+        max_order : int, optional
+            Maximum graphlet order to include. Default is 3.
+        bin_width_factor : float, optional
+            Scale factor applied to estimated bin widths. Default is 1.0.
+        hist_density : bool, optional
+            If True, normalize histograms to density. Default is False.
+
+        Returns
+        -------
+        None
+        """
         self.graphlet_list=graphlet_list
         self.max_order=max_order
         self.bin_width_factor=bin_width_factor
@@ -961,11 +1089,8 @@ class Graphlet_Analyzer:
             
             min_val=np.min(values)
             max_val=np.max(values)
-            print(np.array(values).shape)
             bin_width=calculate_bin_widths(values)
             bin_ranges[feature]=(min_val,max_val,bin_width)
-            print(f"Feature: {feature}, Min Value: {min_val}, Max Value: {max_val}, Bin Width: {bin_width}")
-
             bins[feature]=np.arange(min_val-bin_width/2,max_val+3*bin_width/2,bin_width)
 
         return bins
@@ -1050,7 +1175,6 @@ class Graphlet_Analyzer:
         sorted_feat_bin_value_list = []  # Store the sorted values
         for names, vals in zip(feat_bin_name_list,feat_bin_value_list):
             if names!=feat_bin_names:
-                print('feature arrangement changed!!!')
                 indices = [names.index(item) for item in feat_bin_names]
                 sorted_vals=[vals[i] for i in indices]
                 sorted_feat_bin_value_list.append(sorted_vals)
@@ -1076,7 +1200,6 @@ class Graphlet_Analyzer:
         sorted_feat_magpie_value_list = []  # Store the sorted values
         for names, vals in zip(feat_magpie_name_list,feat_magpie_value_list):
             if names!=feat_magpie_names:
-                print('magpie feature arrangement changed!!!')
                 indices = [names.index(item) for item in feat_magpie_names]
                 sorted_vals=[vals[i] for i in indices]
                 sorted_feat_magpie_value_list.append(sorted_vals)
@@ -1147,6 +1270,37 @@ class Graphlet_AnalyzerFixedBins2D:
     """
     def __init__(self, graphlet_list, bin_centers_2d, feature_names,
                  max_order=3, hist_density=False, verbose=False, strict=False):
+        """
+        Validate and store predefined bin centers for fixed histogramming.
+
+        Parameters
+        ----------
+        graphlet_list : list
+            List of ``Create_Graphlets`` objects, one per material.
+        bin_centers_2d : array-like
+            Two-dimensional array shaped ``(n_features, n_bins)``.
+        feature_names : list of str
+            Feature names corresponding to rows of ``bin_centers_2d``.
+        max_order : int, optional
+            Maximum graphlet order to include. Default is 3.
+        hist_density : bool, optional
+            If True, normalize histograms to density. Default is False.
+        verbose : bool, optional
+            If True, enable verbose diagnostics. Default is False.
+        strict : bool, optional
+            If True, raise when feature coverage is incomplete. Default is
+            False.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        ValueError
+            If ``bin_centers_2d`` is not two-dimensional or if
+            ``feature_names`` does not match its row count.
+        """
         self.graphlet_list = graphlet_list
         self.max_order = max_order
         self.hist_density = hist_density

@@ -1,0 +1,6 @@
+mendeleev
+numpy
+pot
+pymatgen
+scipy
+torch

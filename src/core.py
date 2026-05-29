@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Central graphlet/symmetry/histogram implementation.
+Graphlet and histogram workflow utilities.
 
-This module is the single source-of-truth for:
-- graphlet creation from CIF files
-- symmetry feature extraction from CIF files
-- dynamic/fixed-bin histogram creation from graphlet JSONs
-- batch runner helpers used by CLI entrypoints
+This module provides the central implementation for building graphlet feature
+payloads from CIF files, deriving dynamic or fixed histogram bin centers,
+serializing histogram payloads, and running batch workflows used by the CLI.
+
+Notes
+-----
+The public workflow functions write JSON artifacts rather than pickles so that
+long-running featurization jobs can be inspected, resumed, and consumed by
+downstream distance or kernel routines.
 """
 
 from __future__ import annotations
 
-import argparse
 import concurrent.futures as cf
 import csv
 import json
@@ -21,15 +24,12 @@ import os
 import pickle
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
-import pandas as pd
-import spglib
 from pymatgen.core import Structure as PMGStructure
-from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
-from PYGraphlets import Create_Graphlets
+from graphlets import Create_Graphlets
 
 
 # ---------------------------------------------------------------------------
@@ -40,14 +40,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))
 CONFIG_DIR = os.path.join(PROJECT_ROOT, "config")
 
-DEFAULT_SPACEGROUP_XLS = os.path.join(CONFIG_DIR, "Space_group.xls")
-DEFAULT_SPACEGROUP_SHEET = "Sheet3"
-
 DEFAULT_ATOMIC_RADII_JSON = os.path.join(CONFIG_DIR, "atomic_radii.json")
 DEFAULT_ATOMIC_FEATURES_JSON = os.path.join(CONFIG_DIR, "Filtered_atomic_features.json")
 
 DEFAULT_CLASSIFICATION_BIN_PICKLE = os.path.join(CONFIG_DIR, "bin_centers_classification.pkl")
-DEFAULT_REGRESSION_BIN_PICKLE = os.path.join(CONFIG_DIR, "bin_centers_regression.pkl")
 
 
 # ---------------------------------------------------------------------------
@@ -55,35 +51,115 @@ DEFAULT_REGRESSION_BIN_PICKLE = os.path.join(CONFIG_DIR, "bin_centers_regression
 # ---------------------------------------------------------------------------
 
 def resolve_path(path: str | os.PathLike[str]) -> str:
-    """Return absolute path with ~ and env vars expanded."""
+    """
+    Return an absolute path with user and environment variables expanded.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        Path value to normalize.
+
+    Returns
+    -------
+    str
+        Absolute path string.
+    """
     return os.path.abspath(os.path.expanduser(os.path.expandvars(str(path))))
 
 
 def ensure_dir(path: str | os.PathLike[str]) -> str:
-    """Create directory and return absolute path."""
+    """
+    Create a directory and return its absolute path.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        Directory path to create.
+
+    Returns
+    -------
+    str
+        Absolute directory path.
+    """
     out = resolve_path(path)
     Path(out).mkdir(parents=True, exist_ok=True)
     return out
 
 
 def _ensure_parent(path: str | os.PathLike[str]) -> None:
+    """
+    Create the parent directory for a path if needed.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        File path whose parent directory should exist.
+
+    Returns
+    -------
+    None
+    """
     Path(resolve_path(path)).parent.mkdir(parents=True, exist_ok=True)
 
 
 def timestamp() -> str:
-    """Return local wall-clock timestamp string."""
+    """
+    Return a local wall-clock timestamp string.
+
+    Returns
+    -------
+    str
+        Timestamp formatted as ``YYYY-mm-dd HH:MM:SS``.
+    """
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 class ProgressLogger:
-    """Minimal stdout + optional file logger for long-running jobs."""
+    """
+    Minimal stdout and optional file logger for long-running jobs.
+
+    Parameters
+    ----------
+    log_path : str or os.PathLike or None, optional
+        Optional file path that receives the same timestamped messages printed
+        to stdout.
+
+    Attributes
+    ----------
+    log_path : str or None
+        Absolute log-file path, or None when file logging is disabled.
+    """
 
     def __init__(self, log_path: str | os.PathLike[str] | None = None):
+        """
+        Initialize a logger that mirrors messages to an optional file.
+
+        Parameters
+        ----------
+        log_path : str or os.PathLike or None, optional
+            Destination log file. If None, messages are only printed.
+
+        Returns
+        -------
+        None
+        """
         self.log_path = resolve_path(log_path) if log_path else None
         if self.log_path:
             Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
 
     def log(self, message: str) -> None:
+        """
+        Write a timestamped message to stdout and the configured log file.
+
+        Parameters
+        ----------
+        message : str
+            Message body to log.
+
+        Returns
+        -------
+        None
+        """
         line = f"[{timestamp()}] {message}"
         print(line, flush=True)
         if self.log_path:
@@ -92,6 +168,23 @@ class ProgressLogger:
 
 
 def progress_step(index: int, total: int, label: str) -> str:
+    """
+    Format a simple progress label.
+
+    Parameters
+    ----------
+    index : int
+        Current completed item count.
+    total : int
+        Total number of items.
+    label : str
+        Prefix label for the progress string.
+
+    Returns
+    -------
+    str
+        String formatted as ``"<label> <index>/<total>"``.
+    """
     return f"{label} {index}/{total}"
 
 
@@ -102,7 +195,32 @@ def collect_paths(
     recursive: bool = False,
     files_only: bool = True,
 ) -> list[str]:
-    """Collect matching paths under root_dir, sorted deterministically."""
+    """
+    Collect matching paths under a root directory.
+
+    Parameters
+    ----------
+    root_dir : str or os.PathLike
+        Directory to search.
+    pattern : str
+        Glob pattern to match.
+    recursive : bool, optional
+        If True, search recursively with ``Path.rglob``. Default is False.
+    files_only : bool, optional
+        If True, return only files. Default is True.
+
+    Returns
+    -------
+    list of str
+        Deterministically sorted matching paths.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``root_dir`` does not exist.
+    NotADirectoryError
+        If ``root_dir`` is not a directory.
+    """
     root = Path(resolve_path(root_dir))
     if not root.exists():
         raise FileNotFoundError(f"Input directory not found: {root}")
@@ -121,12 +239,44 @@ def collect_cif_paths(
     recursive: bool = False,
     pattern: str = "*.cif",
 ) -> list[str]:
-    """Collect CIF file paths under root_dir."""
+    """
+    Collect CIF file paths under a root directory.
+
+    Parameters
+    ----------
+    root_dir : str or os.PathLike
+        Directory to search.
+    recursive : bool, optional
+        If True, search subdirectories recursively. Default is False.
+    pattern : str, optional
+        Glob pattern for CIF files. Default is ``"*.cif"``.
+
+    Returns
+    -------
+    list of str
+        Sorted CIF file paths.
+    """
     return collect_paths(root_dir, pattern=pattern, recursive=recursive, files_only=True)
 
 
 def write_json(path: str | os.PathLike[str], payload: dict, *, indent: int = 2) -> str:
-    """Write JSON payload and return absolute output path."""
+    """
+    Write a JSON payload to disk.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        Destination JSON path.
+    payload : dict
+        JSON-serializable object to write.
+    indent : int, optional
+        Indentation passed to ``json.dump``. Default is 2.
+
+    Returns
+    -------
+    str
+        Absolute output path.
+    """
     out_path = resolve_path(path)
     _ensure_parent(out_path)
     with open(out_path, "w") as f:
@@ -135,7 +285,28 @@ def write_json(path: str | os.PathLike[str], payload: dict, *, indent: int = 2) 
 
 
 def write_json_atomic(path: str | os.PathLike[str], payload: dict, *, indent: int = 2) -> str:
-    """Atomically write JSON payload and return absolute output path."""
+    """
+    Atomically write a JSON payload to disk.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        Destination JSON path.
+    payload : dict
+        JSON-serializable object to write.
+    indent : int, optional
+        Indentation passed to ``json.dump``. Default is 2.
+
+    Returns
+    -------
+    str
+        Absolute output path.
+
+    Notes
+    -----
+    Data are first written to a process-specific temporary file and then moved
+    into place with ``os.replace``.
+    """
     out_path = resolve_path(path)
     _ensure_parent(out_path)
     tmp_path = f"{out_path}.tmp.{os.getpid()}"
@@ -146,12 +317,38 @@ def write_json_atomic(path: str | os.PathLike[str], payload: dict, *, indent: in
 
 
 def _load_json(path: str | os.PathLike[str]) -> Dict[str, Any]:
+    """
+    Load a JSON object from disk.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        JSON file to load.
+
+    Returns
+    -------
+    dict
+        Parsed JSON payload.
+    """
     with open(resolve_path(path), "r") as f:
         return json.load(f)
 
 
 def _format_duration(seconds: float | None) -> str:
-    """Render a compact human-readable duration string."""
+    """
+    Render a compact human-readable duration string.
+
+    Parameters
+    ----------
+    seconds : float or None
+        Duration in seconds. Non-finite, negative, and None values are treated
+        as unknown.
+
+    Returns
+    -------
+    str
+        Duration formatted as seconds, minutes, or hours, or ``"unknown"``.
+    """
     if seconds is None or not math.isfinite(seconds) or seconds < 0:
         return "unknown"
     total = int(seconds)
@@ -165,121 +362,6 @@ def _format_duration(seconds: float | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Symmetry extraction
-# ---------------------------------------------------------------------------
-
-class Config:
-    """Default symmetry mapping configuration."""
-
-    EXCEL_MAPPING_XLS: str = os.path.expanduser(
-        os.getenv("EXCEL_MAPPING_XLS", DEFAULT_SPACEGROUP_XLS)
-    )
-    EXCEL_SHEET: str = os.getenv("EXCEL_SHEET", DEFAULT_SPACEGROUP_SHEET)
-
-
-class _SymUtil:
-    """Internal helper utilities for symmetry extraction."""
-
-    @staticmethod
-    def resolve_path(p: str | os.PathLike[str] | None) -> str | None:
-        if p is None:
-            return None
-        return resolve_path(p)
-
-    @staticmethod
-    def sheet_arg(sheet: Union[str, int]) -> Union[str, int]:
-        if isinstance(sheet, int):
-            return sheet
-        s = str(sheet).strip()
-        if s.lstrip("-").isdigit():
-            try:
-                return int(s)
-            except ValueError:
-                return sheet
-        return sheet
-
-
-class SymmetryFeatureExtractor:
-    """
-    Compute averaged symmetry feature vectors from CIFs using a point-group map.
-    """
-
-    def __init__(
-        self,
-        excel_file: str = Config.EXCEL_MAPPING_XLS,
-        sheet_name: Union[str, int] = Config.EXCEL_SHEET,
-        symbol_col_index: int = 1,
-        first_feat_col_index: int = 2,
-    ):
-        df = pd.read_excel(
-            _SymUtil.resolve_path(excel_file),
-            sheet_name=_SymUtil.sheet_arg(sheet_name),
-            header=0,
-        )
-
-        self._feature_names: List[Any] = df.columns[first_feat_col_index:].tolist()
-        symbols = [str(x) for x in df.iloc[:, symbol_col_index].tolist()]
-        rows = df.iloc[:, first_feat_col_index:].values.tolist()
-        self._pg_feature_map: Dict[str, List[float]] = {s: r for s, r in zip(symbols, rows)}
-
-    def from_cif(
-        self,
-        cif_path: str,
-        *,
-        symprec: float = 1e-5,
-        tol: float = 1e-5,
-    ) -> Dict[str, Any]:
-        """
-        Compute averaged symmetry feature vector for a CIF.
-
-        Returns
-        -------
-        dict
-            {"feature_names": list, "feature_values": np.ndarray}
-        """
-        struct = PMGStructure.from_file(_SymUtil.resolve_path(cif_path))
-        sga = SpacegroupAnalyzer(struct, symprec=symprec)
-        sym_ops = sga.get_symmetry_operations()
-
-        n_feat = len(self._feature_names)
-        site_feature_list: List[List[float]] = []
-
-        for site in struct:
-            fc = site.frac_coords % 1.0
-            ops_fix = [op for op in sym_ops if np.allclose(op.operate(fc) % 1.0, fc, atol=tol)]
-
-            if not ops_fix:
-                ptg_symbol = "1"
-            else:
-                rot_mats = [np.rint(op.rotation_matrix).astype(int) for op in ops_fix]
-                ptg_symbol, _, _ = spglib.get_pointgroup(rot_mats)
-
-            site_feature_list.append(self._pg_feature_map.get(ptg_symbol, [0.0] * n_feat))
-
-        avg = np.asarray(site_feature_list, dtype=float).mean(axis=0) if site_feature_list else np.zeros(n_feat)
-        return {"feature_names": self._feature_names, "feature_values": avg}
-
-
-def build_symmetry_feature_payload_from_cif(
-    cif_path: str,
-    *,
-    excel_file: str = DEFAULT_SPACEGROUP_XLS,
-    sheet_name: str = DEFAULT_SPACEGROUP_SHEET,
-) -> Dict[str, Any]:
-    """Build JSON-safe symmetry features for one CIF file."""
-    cif_path = resolve_path(cif_path)
-    extractor = SymmetryFeatureExtractor(
-        excel_file=resolve_path(excel_file),
-        sheet_name=sheet_name,
-    )
-    payload = extractor.from_cif(cif_path)
-    return {
-        "symmetry_feature": np.asarray(payload["feature_values"], dtype=float).tolist(),
-        "symmetry_feature_names": list(payload["feature_names"]),
-    }
-
-
-# ---------------------------------------------------------------------------
 # Graphlet and histogram workflow
 # ---------------------------------------------------------------------------
 
@@ -287,6 +369,23 @@ def _load_atomic_data(
     atomic_radii_path: str = DEFAULT_ATOMIC_RADII_JSON,
     atomic_features_path: str = DEFAULT_ATOMIC_FEATURES_JSON,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Load atomic radii and elemental feature dictionaries.
+
+    Parameters
+    ----------
+    atomic_radii_path : str, optional
+        JSON file containing element radii.
+    atomic_features_path : str, optional
+        JSON file containing element-level scalar features.
+
+    Returns
+    -------
+    atomic_radii : dict
+        Mapping of element symbols to radius values.
+    atomic_features_dict : dict
+        Mapping of element symbols to feature dictionaries.
+    """
     with open(resolve_path(atomic_radii_path), "r") as f:
         atomic_radii = json.load(f)
     with open(resolve_path(atomic_features_path), "r") as f:
@@ -295,6 +394,21 @@ def _load_atomic_data(
 
 
 def _iter_feature_items(compact_payload: Dict[str, Any]) -> Iterable[Tuple[str, List[List[float]]]]:
+    """
+    Yield feature names and value-count pairs from a compact payload.
+
+    Parameters
+    ----------
+    compact_payload : dict
+        Graphlet JSON payload containing ``raw_features_counts``.
+
+    Yields
+    ------
+    feat_name : str
+        Feature name.
+    pairs : list of list of float
+        Compact ``[value, count]`` pairs for the feature.
+    """
     feature_groups = compact_payload.get("raw_features_counts", {})
     for _group_name, feat_dict in feature_groups.items():
         for feat_name, pairs in feat_dict.items():
@@ -302,6 +416,26 @@ def _iter_feature_items(compact_payload: Dict[str, Any]) -> Iterable[Tuple[str, 
 
 
 def _pairs_to_arrays(pairs: Sequence[Sequence[float]]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Split compact value-count pairs into arrays.
+
+    Parameters
+    ----------
+    pairs : sequence of sequence of float
+        Compact feature entries, each shaped as ``[value, count]``.
+
+    Returns
+    -------
+    values : numpy.ndarray
+        One-dimensional feature values.
+    counts : numpy.ndarray
+        One-dimensional counts corresponding to ``values``.
+
+    Raises
+    ------
+    ValueError
+        If ``pairs`` is not a two-column array-like object.
+    """
     if not pairs:
         return np.array([], dtype=float), np.array([], dtype=float)
     arr = np.asarray(pairs, dtype=float)
@@ -311,6 +445,19 @@ def _pairs_to_arrays(pairs: Sequence[Sequence[float]]) -> Tuple[np.ndarray, np.n
 
 
 def _expand_pairs(pairs: Sequence[Sequence[float]]) -> np.ndarray:
+    """
+    Expand compact value-count pairs into repeated sample values.
+
+    Parameters
+    ----------
+    pairs : sequence of sequence of float
+        Compact feature entries, each shaped as ``[value, count]``.
+
+    Returns
+    -------
+    numpy.ndarray
+        One-dimensional array in which each value is repeated by its count.
+    """
     values, counts = _pairs_to_arrays(pairs)
     if values.size == 0:
         return np.array([], dtype=float)
@@ -318,6 +465,33 @@ def _expand_pairs(pairs: Sequence[Sequence[float]]) -> np.ndarray:
 
 
 def _pygraphlets_bin_width(values: np.ndarray, bin_width_factor: float = 1.0) -> float:
+    """
+    Estimate the dynamic histogram bin width used by the graphlet workflow.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Feature values used to estimate the bin width.
+    bin_width_factor : float, optional
+        Multiplicative scale factor applied to the estimated width. Default is
+        1.0.
+
+    Returns
+    -------
+    float
+        Positive bin width.
+
+    Raises
+    ------
+    ValueError
+        If no finite feature values are available.
+
+    Notes
+    -----
+    The width uses the Freedman-Diaconis rule when possible, falls back to a
+    Sturges-style width, and enforces a minimum width of 0.1 for very narrow or
+    constant data.
+    """
     values = np.asarray(values, dtype=float)
     values = values[~np.isnan(values)]
     if values.size == 0:
@@ -339,6 +513,26 @@ def _pygraphlets_bin_width(values: np.ndarray, bin_width_factor: float = 1.0) ->
 
 
 def _pygraphlets_outer_edges(values: np.ndarray, bin_width_factor: float = 1.0) -> np.ndarray:
+    """
+    Compute outer histogram edges using the dynamic graphlet bin-width rule.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Feature values used to determine the histogram range.
+    bin_width_factor : float, optional
+        Multiplicative scale factor passed to ``_pygraphlets_bin_width``.
+
+    Returns
+    -------
+    numpy.ndarray
+        One-dimensional array of outer bin edges.
+
+    Raises
+    ------
+    ValueError
+        If no finite feature values are available.
+    """
     values = np.asarray(values, dtype=float)
     values = values[~np.isnan(values)]
     if values.size == 0:
@@ -351,6 +545,26 @@ def _pygraphlets_outer_edges(values: np.ndarray, bin_width_factor: float = 1.0) 
 
 
 def _fixed_count_edges_from_outer_range(outer_edges: np.ndarray, num_bins: int = 20) -> np.ndarray:
+    """
+    Convert an outer edge span into evenly spaced bin edges.
+
+    Parameters
+    ----------
+    outer_edges : numpy.ndarray
+        Edges defining the full outer histogram range.
+    num_bins : int, optional
+        Number of equal-width bins to create. Default is 20.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of length ``num_bins + 1`` containing fixed-count bin edges.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two outer edges are provided or ``num_bins < 1``.
+    """
     outer_edges = np.asarray(outer_edges, dtype=float)
     if outer_edges.size < 2:
         raise ValueError("At least two outer edges are required.")
@@ -360,6 +574,24 @@ def _fixed_count_edges_from_outer_range(outer_edges: np.ndarray, num_bins: int =
 
 
 def _edges_to_centers(edges: np.ndarray) -> np.ndarray:
+    """
+    Convert bin edges to midpoint bin centers.
+
+    Parameters
+    ----------
+    edges : numpy.ndarray
+        One-dimensional bin edge array.
+
+    Returns
+    -------
+    numpy.ndarray
+        Midpoint centers between adjacent edges.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two edges are provided.
+    """
     edges = np.asarray(edges, dtype=float)
     if edges.size < 2:
         raise ValueError("At least two edges are required to compute bin centers.")
@@ -372,6 +604,26 @@ def _nearest_center_counts(
     centers: np.ndarray,
     hist_density: bool,
 ) -> np.ndarray:
+    """
+    Aggregate weighted feature values into nearest-center bins.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Feature values to bin.
+    counts : numpy.ndarray
+        Weights or counts for each value.
+    centers : numpy.ndarray
+        Fixed bin centers.
+    hist_density : bool
+        If True, normalize counts so the returned vector sums to one when it
+        has positive mass.
+
+    Returns
+    -------
+    numpy.ndarray
+        Histogram heights aligned with ``centers``.
+    """
     if centers.size == 0:
         return np.array([], dtype=float)
 
@@ -393,6 +645,22 @@ def _padded_hist_array(
     hist_names: List[str],
     hist_map: Dict[str, Tuple[np.ndarray, np.ndarray]],
 ) -> List[List[List[float]]]:
+    """
+    Build a padded histogram array for JSON serialization.
+
+    Parameters
+    ----------
+    hist_names : list of str
+        Histogram feature names in output order.
+    hist_map : dict
+        Mapping from histogram name to ``(centers, heights)`` arrays.
+
+    Returns
+    -------
+    list of list of list of float
+        JSON-safe array shaped as ``(n_histograms, max_nbins, 2)``. Unused bins
+        are padded with ``-1.0``.
+    """
     max_nbins = max((len(hist_map[name][0]) for name in hist_names), default=0)
     hist_array = np.full((len(hist_names), max_nbins, 2), -1.0, dtype=float)
     for hi, feat in enumerate(hist_names):
@@ -408,7 +676,24 @@ def build_compact_feature_payload_from_cif(
     atomic_radii_path: str = DEFAULT_ATOMIC_RADII_JSON,
     atomic_features_path: str = DEFAULT_ATOMIC_FEATURES_JSON,
 ) -> Dict[str, Any]:
-    """Build compact graphlet feature payload (counts) from one CIF file."""
+    """
+    Build a compact graphlet feature payload from one CIF file.
+
+    Parameters
+    ----------
+    cif_path : str
+        Input CIF file path.
+    atomic_radii_path : str, optional
+        JSON file containing element radii.
+    atomic_features_path : str, optional
+        JSON file containing element-level feature values.
+
+    Returns
+    -------
+    dict
+        JSON-ready graphlet payload containing compact value-count feature
+        dictionaries and structure metadata.
+    """
     cif_path = resolve_path(cif_path)
     atomic_radii, atomic_features_dict = _load_atomic_data(
         atomic_radii_path=atomic_radii_path,
@@ -431,7 +716,27 @@ def build_graphlet_payload_from_cif(
     *,
     include_compact_features: bool = True,
 ) -> Dict[str, Any]:
-    """Build full graphlet JSON payload from one CIF file."""
+    """
+    Build a full graphlet JSON payload from one CIF file.
+
+    Parameters
+    ----------
+    cif_path : str
+        Input CIF file path.
+    atomic_radii_path : str, optional
+        JSON file containing element radii.
+    atomic_features_path : str, optional
+        JSON file containing element-level feature values.
+    include_compact_features : bool, optional
+        If True, store compact value-count features. If False, store raw
+        feature value lists. Default is True.
+
+    Returns
+    -------
+    dict
+        JSON-ready graphlet payload containing metadata, graphlet records, and
+        either compact or raw feature values.
+    """
     cif_path = resolve_path(cif_path)
     atomic_radii, atomic_features_dict = _load_atomic_data(
         atomic_radii_path=atomic_radii_path,
@@ -459,7 +764,27 @@ def build_and_save_graphlet_json(
     *,
     include_compact_features: bool = True,
 ) -> str:
-    """Build and write graphlet JSON payload for one CIF."""
+    """
+    Build and write a graphlet JSON payload for one CIF file.
+
+    Parameters
+    ----------
+    cif_path : str
+        Input CIF file path.
+    out_path : str
+        Destination JSON path.
+    atomic_radii_path : str, optional
+        JSON file containing element radii.
+    atomic_features_path : str, optional
+        JSON file containing element-level feature values.
+    include_compact_features : bool, optional
+        If True, write compact value-count features. Default is True.
+
+    Returns
+    -------
+    str
+        Absolute output JSON path.
+    """
     payload = build_graphlet_payload_from_cif(
         cif_path,
         atomic_radii_path=atomic_radii_path,
@@ -478,7 +803,31 @@ def batch_build_graphlet_jsons(
     atomic_features_path: str = DEFAULT_ATOMIC_FEATURES_JSON,
     include_compact_features: bool = True,
 ) -> List[str]:
-    """Build graphlet JSON files for a list of CIF paths."""
+    """
+    Build graphlet JSON files for multiple CIF paths.
+
+    Parameters
+    ----------
+    cif_paths : sequence of str
+        Input CIF file paths.
+    graphlet_out_dir : str
+        Directory where graphlet JSON files are written.
+    suffix : str, optional
+        Filename suffix appended to each CIF stem. Default is
+        ``"_graphlets.json"``.
+    atomic_radii_path : str, optional
+        JSON file containing element radii.
+    atomic_features_path : str, optional
+        JSON file containing element-level feature values.
+    include_compact_features : bool, optional
+        If True, include compact value-count feature dictionaries. Default is
+        True.
+
+    Returns
+    -------
+    list of str
+        Output graphlet JSON paths in the same order as ``cif_paths``.
+    """
     out_dir = ensure_dir(graphlet_out_dir)
     out_paths: List[str] = []
     for cif_path in cif_paths:
@@ -503,7 +852,28 @@ def derive_dynamic_bin_centers(
     num_bins: int = 20,
     bin_width_factor: float = 1.0,
 ) -> Dict[str, Any]:
-    """Derive dynamic bin centers from compact graphlet JSON files."""
+    """
+    Derive dynamic histogram bin centers from compact graphlet JSON files.
+
+    Parameters
+    ----------
+    compact_json_paths : sequence of str
+        Graphlet JSON files containing ``raw_features_counts``.
+    out_path : str or None, optional
+        Destination JSON path for the derived bin-center payload. If None, the
+        payload is returned without being written.
+    num_bins : int, optional
+        Number of bins to derive for each feature. Default is 20.
+    bin_width_factor : float, optional
+        Scale factor used when estimating the outer dynamic graphlet bin
+        range. Default is 1.0.
+
+    Returns
+    -------
+    dict
+        Bin-center payload with feature names, bin centers, bin edges, padded
+        2D centers, outer ranges, and provenance.
+    """
     aggregated: Dict[str, List[np.ndarray]] = {}
     for path in compact_json_paths:
         payload = _load_json(path)
@@ -551,7 +921,28 @@ def derive_dynamic_bin_centers(
 
 
 def load_predefined_bin_centers(path: str, *, fmt: str = "auto") -> Dict[str, Any]:
-    """Load bin centers from JSON or legacy pickle format."""
+    """
+    Load bin centers from JSON or legacy pickle format.
+
+    Parameters
+    ----------
+    path : str
+        Bin-center file path.
+    fmt : {"auto", "json", "pickle"}, optional
+        File format to load. ``"auto"`` selects pickle for ``.pkl`` paths and
+        JSON otherwise.
+
+    Returns
+    -------
+    dict
+        Normalized bin-center payload containing ``feature_names`` and
+        ``bin_centers``.
+
+    Raises
+    ------
+    ValueError
+        If the JSON payload is missing required keys or ``fmt`` is invalid.
+    """
     path = resolve_path(path)
     if fmt == "auto":
         fmt = "pickle" if path.endswith(".pkl") else "json"
@@ -590,7 +981,27 @@ def ensure_bin_centers(
     num_bins: int = 20,
     bin_width_factor: float = 1.0,
 ) -> Dict[str, Any]:
-    """Load bin centers from disk or derive+save dynamic bin centers."""
+    """
+    Load bin centers from disk or derive and save dynamic bin centers.
+
+    Parameters
+    ----------
+    compact_json_paths : sequence of str
+        Graphlet JSON files used to derive bins when needed.
+    bin_centers_path : str
+        File path to load from or write to.
+    prefer_existing : bool, optional
+        If True and ``bin_centers_path`` exists, reuse it. Default is True.
+    num_bins : int, optional
+        Number of bins to derive per feature when a new file is needed.
+    bin_width_factor : float, optional
+        Scale factor for dynamic range estimation. Default is 1.0.
+
+    Returns
+    -------
+    dict
+        Loaded or newly derived bin-center payload.
+    """
     bin_centers_path = resolve_path(bin_centers_path)
     if prefer_existing and os.path.exists(bin_centers_path):
         return load_predefined_bin_centers(bin_centers_path, fmt="auto")
@@ -609,7 +1020,33 @@ def histogram_compact_feature_payload(
     hist_density: bool = False,
     strict: bool = False,
 ) -> Dict[str, Any]:
-    """Convert one compact graphlet payload into histogram features."""
+    """
+    Convert a compact graphlet payload into histogram features.
+
+    Parameters
+    ----------
+    compact_payload : dict
+        Graphlet payload containing compact value-count feature dictionaries.
+    bin_center_payload : dict
+        Payload containing ``feature_names`` and ``bin_centers``.
+    hist_density : bool, optional
+        If True, normalize each histogram's heights. Default is False.
+    strict : bool, optional
+        If True, raise when compact features lack bin centers. Default is
+        False.
+
+    Returns
+    -------
+    dict
+        Histogram payload containing padded histogram arrays, flattened
+        per-bin features, magpie-like mean/std features, and metadata.
+
+    Raises
+    ------
+    KeyError
+        If ``strict`` is True and the compact payload contains unknown
+        features.
+    """
     feature_to_pairs = {feat_name: pairs for feat_name, pairs in _iter_feature_items(compact_payload)}
     hist_names = list(bin_center_payload["feature_names"])
     bin_center_map = bin_center_payload["bin_centers"]
@@ -665,7 +1102,28 @@ def histogram_compact_feature_json(
     hist_density: bool = False,
     strict: bool = False,
 ) -> Dict[str, Any]:
-    """Load one compact graphlet JSON and write/return histogram payload."""
+    """
+    Load one compact graphlet JSON and create a histogram payload.
+
+    Parameters
+    ----------
+    compact_json_path : str
+        Input graphlet JSON path.
+    bin_center_payload : dict
+        Payload containing feature names and bin centers.
+    out_path : str or None, optional
+        Destination histogram JSON path. If None, no file is written.
+    hist_density : bool, optional
+        If True, normalize histogram heights. Default is False.
+    strict : bool, optional
+        If True, raise for compact features without stored bin centers.
+        Default is False.
+
+    Returns
+    -------
+    dict
+        Histogram payload.
+    """
     payload = _load_json(compact_json_path)
     hist_payload = histogram_compact_feature_payload(
         payload,
@@ -689,7 +1147,34 @@ def batch_histogram_compact_feature_jsons(
     num_bins: int = 20,
     bin_width_factor: float = 1.0,
 ) -> List[str]:
-    """End-to-end histogram workflow from graphlet JSON files."""
+    """
+    Build histogram JSON files from graphlet JSON files.
+
+    Parameters
+    ----------
+    compact_json_paths : sequence of str
+        Input graphlet JSON files containing compact feature counts.
+    bin_centers_path : str
+        Path to load or write bin-center definitions.
+    histogram_out_dir : str
+        Directory where histogram JSON files are written.
+    hist_density : bool, optional
+        If True, normalize histogram heights. Default is False.
+    strict : bool, optional
+        If True, raise for compact features without stored bin centers.
+        Default is False.
+    prefer_existing_bins : bool, optional
+        If True, reuse an existing bin-center file. Default is True.
+    num_bins : int, optional
+        Number of bins used when deriving new bin centers. Default is 20.
+    bin_width_factor : float, optional
+        Scale factor for dynamic range estimation. Default is 1.0.
+
+    Returns
+    -------
+    list of str
+        Output histogram JSON paths.
+    """
     bin_payload = ensure_bin_centers(
         compact_json_paths,
         bin_centers_path=bin_centers_path,
@@ -729,7 +1214,44 @@ def run_full_graphlet_histogram_workflow(
     atomic_features_path: str = DEFAULT_ATOMIC_FEATURES_JSON,
     include_compact_features: bool = True,
 ) -> Dict[str, Any]:
-    """Run CIF -> graphlet JSON -> histogram JSON workflow."""
+    """
+    Run the complete CIF to graphlet JSON to histogram JSON workflow.
+
+    Parameters
+    ----------
+    cif_paths : sequence of str
+        Input CIF file paths.
+    graphlet_out_dir : str
+        Directory where graphlet JSON files are written.
+    bin_centers_path : str
+        Path to load or write bin-center definitions.
+    histogram_out_dir : str
+        Directory where histogram JSON files are written.
+    num_bins : int, optional
+        Number of bins used when deriving new bin centers. Default is 20.
+    bin_width_factor : float, optional
+        Scale factor for dynamic range estimation. Default is 1.0.
+    hist_density : bool, optional
+        If True, normalize histogram heights. Default is False.
+    strict : bool, optional
+        If True, raise for compact features without stored bin centers.
+        Default is False.
+    prefer_existing_bins : bool, optional
+        If True, reuse an existing bin-center file. Default is True.
+    atomic_radii_path : str, optional
+        JSON file containing element radii.
+    atomic_features_path : str, optional
+        JSON file containing element-level feature values.
+    include_compact_features : bool, optional
+        If True, graphlet JSON files include compact value-count features.
+        Default is True.
+
+    Returns
+    -------
+    dict
+        Workflow summary with input paths, output paths, binning settings, and
+        artifact counts.
+    """
     graphlet_paths = batch_build_graphlet_jsons(
         cif_paths,
         graphlet_out_dir=graphlet_out_dir,
@@ -783,7 +1305,29 @@ def _graphlet_build_worker(
     atomic_features_path: str,
     include_compact_features: bool,
 ) -> Dict[str, Any]:
-    """Worker for one CIF -> graphlet JSON task."""
+    """
+    Build one graphlet JSON payload inside a process-pool worker.
+
+    Parameters
+    ----------
+    cif_path : str
+        Input CIF file path.
+    out_path : str
+        Destination graphlet JSON path.
+    atomic_radii_path : str
+        JSON file containing element radii.
+    atomic_features_path : str
+        JSON file containing element-level feature values.
+    include_compact_features : bool
+        If True, include compact value-count features in the output payload.
+
+    Returns
+    -------
+    dict
+        Worker result. Successful results contain ``ok=True``, paths, and
+        elapsed seconds; failed results contain ``ok=False`` plus error
+        metadata.
+    """
     start = time.time()
     try:
         build_and_save_graphlet_json(
@@ -837,6 +1381,72 @@ def run_folder_graphlet_build(
 
     Resume behavior is file-based by default:
     existing output JSON files are skipped unless ``overwrite=True``.
+
+    Parameters
+    ----------
+    input_dir : str
+        Directory containing CIF files.
+    output_dir : str
+        Directory where graphlet JSON files and default state files are
+        written.
+    pattern : str, optional
+        Glob pattern used to discover CIF files. Default is ``"*.cif"``.
+    recursive : bool, optional
+        If True, discover CIF files recursively. Default is False.
+    suffix : str, optional
+        Suffix appended to each CIF stem for output filenames. Default is
+        ``"_graphlet.json"``.
+    atomic_radii_path : str, optional
+        JSON file containing element radii.
+    atomic_features_path : str, optional
+        JSON file containing element-level feature values.
+    include_compact_features : bool, optional
+        If True, include compact value-count features in graphlet outputs.
+        Default is True.
+    overwrite : bool, optional
+        If True, rebuild existing graphlet JSON files. Default is False.
+    fail_fast : bool, optional
+        If True, stop submitting new jobs after the first failure. Default is
+        False.
+    progress_every : int, optional
+        Number of completed items between progress log messages. Default is
+        100.
+    manifest_path : str or None, optional
+        Optional manifest JSON path. If None, a default file is created in
+        ``output_dir``.
+    progress_log : str or None, optional
+        Optional progress log file path.
+    max_workers : int, optional
+        Requested process-pool worker count. Default is 20.
+    cpu_cap : int, optional
+        Hard upper bound on effective worker count. Default is 20.
+    max_in_flight : int or None, optional
+        Maximum number of submitted but unfinished jobs. If None, defaults to
+        three times the effective worker count.
+    monitor_interval : float, optional
+        Seconds between heartbeat updates when no jobs finish. Default is
+        30.0.
+    checkpoint_every : int, optional
+        Number of finished worker tasks between state-file checkpoints.
+        Default is 25.
+    state_path : str or None, optional
+        Optional live state JSON path. If None, a default file is created in
+        ``output_dir``.
+
+    Returns
+    -------
+    dict
+        Manifest payload summarizing inputs, outputs, parallel settings,
+        counts, timing, and failures.
+
+    Raises
+    ------
+    SystemExit
+        If no CIF files are found.
+    RuntimeError
+        If ``fail_fast`` is True and at least one CIF fails.
+    KeyboardInterrupt
+        Re-raised after writing an interrupted state checkpoint.
     """
     input_dir = resolve_path(input_dir)
     output_dir = ensure_dir(output_dir)
@@ -919,6 +1529,23 @@ def run_folder_graphlet_build(
         running: int,
         queued_not_submitted: int,
     ) -> Dict[str, Any]:
+        """
+        Build the live state payload for a folder graphlet build.
+
+        Parameters
+        ----------
+        status : str
+            Current workflow status label.
+        running : int
+            Number of tasks currently submitted and unfinished.
+        queued_not_submitted : int
+            Number of discovered jobs not yet submitted to the process pool.
+
+        Returns
+        -------
+        dict
+            State payload suitable for writing to ``state_path``.
+        """
         completed_total = built + skipped + failed
         pending_total = max(0, total - completed_total)
         elapsed_s = time.time() - start_epoch
@@ -974,6 +1601,22 @@ def run_folder_graphlet_build(
         running: int,
         queued_not_submitted: int,
     ) -> None:
+        """
+        Write the current folder-build state to disk atomically.
+
+        Parameters
+        ----------
+        status : str
+            Current workflow status label.
+        running : int
+            Number of tasks currently submitted and unfinished.
+        queued_not_submitted : int
+            Number of discovered jobs not yet submitted to the process pool.
+
+        Returns
+        -------
+        None
+        """
         payload = _build_state_payload(
             status=status,
             running=running,
@@ -993,6 +1636,18 @@ def run_folder_graphlet_build(
         stop_submission = False
 
         def _submit_more(executor: cf.ProcessPoolExecutor) -> None:
+            """
+            Submit queued graphlet jobs until the in-flight limit is reached.
+
+            Parameters
+            ----------
+            executor : concurrent.futures.ProcessPoolExecutor
+                Process pool used to execute graphlet build workers.
+
+            Returns
+            -------
+            None
+            """
             nonlocal next_job_idx
             nonlocal submitted
             while (
@@ -1176,6 +1831,23 @@ def run_folder_graphlet_build(
 
 
 def _collect_cif_paths_from_csv(csv_path: str, cif_column: str = "cif") -> tuple[list[str], list[str]]:
+    """
+    Collect existing and missing CIF paths from a CSV column.
+
+    Parameters
+    ----------
+    csv_path : str
+        CSV file containing CIF path rows.
+    cif_column : str, optional
+        Column name containing CIF paths. Default is ``"cif"``.
+
+    Returns
+    -------
+    existing : list of str
+        Unique CIF paths that exist on disk.
+    missing : list of str
+        Unique CIF paths that were present in the CSV but missing on disk.
+    """
     existing: list[str] = []
     missing: list[str] = []
     seen: set[str] = set()
@@ -1209,7 +1881,49 @@ def run_csv_graphlet_histogram_build(
     hist_density: bool = False,
     recompute_bins: bool = False,
 ) -> Dict[str, Any]:
-    """CSV-driven graphlet + histogram workflow."""
+    """
+    Run a CSV-driven graphlet and histogram workflow.
+
+    Parameters
+    ----------
+    csv_path : str
+        CSV file containing a column of CIF paths.
+    cif_column : str, optional
+        Column containing CIF paths. Default is ``"cif"``.
+    out_root : str
+        Root output directory for graphlets, histograms, bin centers, logs, and
+        manifests.
+    graphlet_dir_name : str, optional
+        Subdirectory name for graphlet JSON files.
+    histogram_dir_name : str, optional
+        Subdirectory name for histogram JSON files.
+    bin_centers_name : str, optional
+        Filename for the dynamic bin-center JSON.
+    manifest_name : str, optional
+        Filename for the workflow manifest.
+    progress_log_name : str, optional
+        Filename for the progress log.
+    missing_name : str, optional
+        Filename for the missing-CIF list.
+    num_bins : int, optional
+        Number of bins to derive for each feature. Default is 20.
+    hist_density : bool, optional
+        If True, normalize histogram heights. Default is False.
+    recompute_bins : bool, optional
+        If True, recompute bin centers even when the bin-center file already
+        exists. Default is False.
+
+    Returns
+    -------
+    dict
+        Manifest payload summarizing input counts, output paths, binning
+        settings, and generated artifact counts.
+
+    Raises
+    ------
+    SystemExit
+        If the CSV contains no existing CIF paths in ``cif_column``.
+    """
     csv_path = resolve_path(csv_path)
     out_root = ensure_dir(out_root)
     graphlet_dir = ensure_dir(os.path.join(out_root, graphlet_dir_name))
@@ -1305,106 +2019,165 @@ def run_csv_graphlet_histogram_build(
     return manifest
 
 
-# ---------------------------------------------------------------------------
-# Compact workflow CLI (keeps previous behavior)
-# ---------------------------------------------------------------------------
+def run_graphlet_pipeline(
+    *,
+    input_dir: str,
+    out_root: str,
+    pattern: str = "*.cif",
+    recursive: bool = False,
+    graphlet_dir_name: str = "graphlets",
+    histogram_dir_name: str = "histograms",
+    bin_centers_name: str = "bin_centers.json",
+    manifest_name: str = "pipeline_manifest.json",
+    reference_graphlet_paths: Sequence[str] | None = None,
+    reference_limit: int | None = None,
+    num_bins: int = 20,
+    bin_width_factor: float = 1.0,
+    hist_density: bool = False,
+    recompute_bins: bool = False,
+    overwrite_graphlets: bool = False,
+    fail_fast: bool = False,
+    max_workers: int = 20,
+    cpu_cap: int = 20,
+) -> Dict[str, Any]:
+    """
+    Run the user-facing CIF-to-histogram pipeline.
 
-def _parse_compact_cli_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run the CIF -> graphlet JSON -> bin centers -> histogram JSON workflow."
-    )
-    parser.add_argument(
-        "cif_inputs",
-        nargs="+",
-        help="One or more CIF files or directories containing CIF files.",
-    )
-    parser.add_argument(
-        "--graphlet-out-dir",
-        required=True,
-        help="Directory where graphlet JSON files will be written.",
-    )
-    parser.add_argument(
-        "--bin-centers-path",
-        required=True,
-        help="Path where the bin-centers JSON file will be written or reused.",
-    )
-    parser.add_argument(
-        "--histogram-out-dir",
-        required=True,
-        help="Directory where histogram JSON files will be written.",
-    )
-    parser.add_argument(
-        "--num-bins",
-        type=int,
-        default=20,
-        help="Number of bins per feature. Default: 20.",
-    )
-    parser.add_argument(
-        "--bin-width-factor",
-        type=float,
-        default=1.0,
-        help="Bin-width scaling factor for the PYGraphlets-style outer range. Default: 1.0.",
-    )
-    parser.add_argument(
-        "--hist-density",
-        action="store_true",
-        help="Normalize histogram heights instead of storing raw counts.",
-    )
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Raise if a compact feature JSON contains a feature without a stored bin center.",
-    )
-    parser.add_argument(
-        "--recompute-bins",
-        action="store_true",
-        help="Force regeneration of the bin-centers file even if it already exists.",
-    )
-    parser.add_argument(
-        "--exclude-compact-features",
-        action="store_true",
-        help="Do not include raw_features_counts in the graphlet JSON files.",
-    )
-    return parser.parse_args()
+    This helper performs the recommended staged workflow in one call:
+    graphlet JSON generation, shared bin-center creation or reuse, and
+    histogram JSON generation.
 
+    Parameters
+    ----------
+    input_dir : str
+        Directory containing input CIF files.
+    out_root : str
+        Root directory for all generated artifacts.
+    pattern : str, optional
+        Glob pattern used to discover CIF files. Default is ``"*.cif"``.
+    recursive : bool, optional
+        If True, discover CIF files recursively. Default is False.
+    graphlet_dir_name : str, optional
+        Subdirectory name under ``out_root`` for graphlet JSON files.
+    histogram_dir_name : str, optional
+        Subdirectory name under ``out_root`` for histogram JSON files.
+    bin_centers_name : str, optional
+        Filename under ``out_root`` for the shared bin-center JSON.
+    manifest_name : str, optional
+        Filename under ``out_root`` for the pipeline manifest.
+    reference_graphlet_paths : sequence of str or None, optional
+        Optional graphlet JSON paths used to derive bin centers. If None, all
+        graphlets from the current build are used, subject to
+        ``reference_limit``.
+    reference_limit : int or None, optional
+        Optional deterministic limit on the number of graphlet files used for
+        bin-center derivation. Applied only when ``reference_graphlet_paths`` is
+        None.
+    num_bins : int, optional
+        Number of bins to derive for each feature. Default is 20.
+    bin_width_factor : float, optional
+        Scale factor for dynamic bin range estimation. Default is 1.0.
+    hist_density : bool, optional
+        If True, normalize histogram heights. Default is False.
+    recompute_bins : bool, optional
+        If True, recompute bin centers even when the bin-center file exists.
+        Default is False.
+    overwrite_graphlets : bool, optional
+        If True, rebuild graphlet JSON files that already exist. Default is
+        False.
+    fail_fast : bool, optional
+        If True, stop after the first CIF failure during graphlet generation.
+        Default is False.
+    max_workers : int, optional
+        Requested process-pool worker count for graphlet generation. Default
+        is 20.
+    cpu_cap : int, optional
+        Hard upper bound on graphlet worker count. Default is 20.
 
-def _expand_cif_inputs(inputs: Sequence[str]) -> List[str]:
-    cif_paths: List[str] = []
-    for item in inputs:
-        path = Path(resolve_path(item))
-        if path.is_dir():
-            cif_paths.extend(sorted(str(p) for p in path.glob("*.cif")))
-        else:
-            cif_paths.append(str(path))
+    Returns
+    -------
+    dict
+        Pipeline manifest with artifact paths, counts, and binning metadata.
 
-    seen = set()
-    ordered: List[str] = []
-    for path in cif_paths:
-        if path not in seen:
-            seen.add(path)
-            ordered.append(path)
-    return ordered
+    Raises
+    ------
+    SystemExit
+        If no CIF files are found or no reference graphlets are available.
+    """
+    out_root = ensure_dir(out_root)
+    graphlet_dir = ensure_dir(os.path.join(out_root, graphlet_dir_name))
+    histogram_dir = ensure_dir(os.path.join(out_root, histogram_dir_name))
+    bin_centers_path = resolve_path(os.path.join(out_root, bin_centers_name))
+    manifest_path = resolve_path(os.path.join(out_root, manifest_name))
 
-
-def compact_workflow_cli_main() -> None:
-    args = _parse_compact_cli_args()
-    cif_paths = _expand_cif_inputs(args.cif_inputs)
-    if not cif_paths:
-        raise SystemExit("No CIF files were found in the provided inputs.")
-
-    result = run_full_graphlet_histogram_workflow(
-        cif_paths,
-        graphlet_out_dir=args.graphlet_out_dir,
-        bin_centers_path=args.bin_centers_path,
-        histogram_out_dir=args.histogram_out_dir,
-        num_bins=args.num_bins,
-        bin_width_factor=args.bin_width_factor,
-        hist_density=args.hist_density,
-        strict=args.strict,
-        prefer_existing_bins=not args.recompute_bins,
-        include_compact_features=not args.exclude_compact_features,
+    graphlet_manifest = run_folder_graphlet_build(
+        input_dir=input_dir,
+        output_dir=graphlet_dir,
+        pattern=pattern,
+        recursive=recursive,
+        overwrite=overwrite_graphlets,
+        fail_fast=fail_fast,
+        max_workers=max_workers,
+        cpu_cap=cpu_cap,
     )
-    print(json.dumps(result, indent=2))
+    graphlet_paths = list(graphlet_manifest["graphlet_paths"])
+
+    if reference_graphlet_paths is not None:
+        reference_paths = [resolve_path(path) for path in reference_graphlet_paths]
+    else:
+        reference_paths = list(graphlet_paths)
+        if reference_limit is not None:
+            reference_paths = reference_paths[: max(0, int(reference_limit))]
+
+    if not reference_paths:
+        raise SystemExit("No reference graphlet JSON files are available for bin-center derivation.")
+
+    if recompute_bins or not os.path.exists(bin_centers_path):
+        bin_payload = derive_dynamic_bin_centers(
+            reference_paths,
+            out_path=bin_centers_path,
+            num_bins=num_bins,
+            bin_width_factor=bin_width_factor,
+        )
+        bin_source = "derived"
+    else:
+        bin_payload = load_predefined_bin_centers(bin_centers_path, fmt="auto")
+        bin_source = "reused"
+
+    histogram_paths = batch_histogram_compact_feature_jsons(
+        graphlet_paths,
+        bin_centers_path=bin_centers_path,
+        histogram_out_dir=histogram_dir,
+        hist_density=hist_density,
+        strict=False,
+        prefer_existing_bins=True,
+        num_bins=num_bins,
+        bin_width_factor=bin_width_factor,
+    )
+
+    manifest = {
+        "input_dir": resolve_path(input_dir),
+        "out_root": out_root,
+        "graphlet_dir": graphlet_dir,
+        "histogram_dir": histogram_dir,
+        "bin_centers_path": bin_centers_path,
+        "manifest_path": manifest_path,
+        "graphlet_manifest_path": graphlet_manifest["manifest_path"],
+        "graphlet_state_path": graphlet_manifest["state_path"],
+        "num_input_cifs": graphlet_manifest["num_input_cifs"],
+        "num_graphlet_jsons": len(graphlet_paths),
+        "num_reference_graphlets": len(reference_paths),
+        "num_histogram_jsons": len(histogram_paths),
+        "num_bins": int(num_bins),
+        "num_histogram_channels": len(bin_payload.get("feature_names", [])),
+        "hist_density": bool(hist_density),
+        "bin_centers_source": bin_source,
+        "graphlet_paths": graphlet_paths,
+        "reference_graphlet_paths": reference_paths,
+        "histogram_paths": histogram_paths,
+    }
+    write_json(manifest_path, manifest, indent=2)
+    return manifest
 
 
 __all__ = [
@@ -1418,15 +2191,12 @@ __all__ = [
     "collect_cif_paths",
     "write_json",
     "write_json_atomic",
-    # symmetry
-    "Config",
-    "SymmetryFeatureExtractor",
-    "build_symmetry_feature_payload_from_cif",
-    # workflow
+    # graphlet featurization
     "build_compact_feature_payload_from_cif",
     "build_graphlet_payload_from_cif",
     "build_and_save_graphlet_json",
     "batch_build_graphlet_jsons",
+    # histogram workflow
     "derive_dynamic_bin_centers",
     "load_predefined_bin_centers",
     "ensure_bin_centers",
@@ -1434,9 +2204,8 @@ __all__ = [
     "histogram_compact_feature_json",
     "batch_histogram_compact_feature_jsons",
     "run_full_graphlet_histogram_workflow",
-    # runners
+    # batch runners
+    "run_graphlet_pipeline",
     "run_folder_graphlet_build",
     "run_csv_graphlet_histogram_build",
-    # cli
-    "compact_workflow_cli_main",
 ]

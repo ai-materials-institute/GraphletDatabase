@@ -3,14 +3,31 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .venv/
+.ruff_cache/
+.ipynb_checkpoints/
+build/
+dist/
+*.egg-info/
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
 
 # Local/temporary outputs
 *.log
 *.tmp
 tmp/
+ICSD_Features/
 
 # Generated graphlet artifacts
 Graphlets/
+
+# Test/coverage artifacts
+htmlcov/
+.coverage
+coverage.xml
 
 # Local agent metadata
 .agents/
