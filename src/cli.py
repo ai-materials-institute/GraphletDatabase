@@ -17,9 +17,11 @@ import os
 from pathlib import Path
 
 from core import (
+    collect_graphlet_json_paths,
     run_csv_graphlet_histogram_build,
     run_folder_graphlet_build,
     run_full_graphlet_histogram_workflow,
+    run_graphlet_histogram_build,
     run_graphlet_pipeline,
 )
 
@@ -336,6 +338,185 @@ def pipeline_main(argv: list[str] | None = None) -> None:
     print(json.dumps(manifest, indent=2))
 
 
+def build_histograms_parser() -> argparse.ArgumentParser:
+    """
+    Create the parser for graphlet JSON to histogram JSON builds.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Parser configured for graphlet inputs, optional bin-reference inputs,
+        bin-center reuse or derivation, resume behavior, and histogram output.
+    """
+    parser = argparse.ArgumentParser(
+        description="Build histogram JSON files from existing graphlet JSON files."
+    )
+    parser.add_argument(
+        "graphlet_paths",
+        nargs="*",
+        help="Explicit graphlet JSON files to histogram.",
+    )
+    parser.add_argument(
+        "--graphlet-dir",
+        action="append",
+        default=[],
+        help="Directory of graphlet JSON files. May be supplied more than once.",
+    )
+    parser.add_argument(
+        "--graphlet-list",
+        action="append",
+        default=[],
+        help="Newline-delimited graphlet JSON path list. May be supplied more than once.",
+    )
+    parser.add_argument(
+        "--pattern",
+        default="*_graphlet.json",
+        help="Glob pattern for --graphlet-dir scans. Default: '*_graphlet.json'.",
+    )
+    parser.add_argument(
+        "--reference-graphlet-dir",
+        action="append",
+        default=[],
+        help="Directory of graphlet JSON files used only to derive bin centers.",
+    )
+    parser.add_argument(
+        "--reference-graphlet-list",
+        action="append",
+        default=[],
+        help="Newline-delimited graphlet JSON path list used only to derive bin centers.",
+    )
+    parser.add_argument(
+        "--reference-graphlet",
+        action="append",
+        default=[],
+        help="Explicit graphlet JSON file used only to derive bin centers. May be repeated.",
+    )
+    parser.add_argument(
+        "--reference-pattern",
+        default=None,
+        help="Glob pattern for --reference-graphlet-dir scans. Default: same as --pattern.",
+    )
+    parser.add_argument(
+        "--histogram-out-dir",
+        required=True,
+        help="Directory where histogram JSON files will be written.",
+    )
+    parser.add_argument(
+        "--bin-centers-path",
+        default=None,
+        help="Optional bin-centers JSON path. Existing files are reused unless --recompute-bins is passed.",
+    )
+    parser.add_argument(
+        "--manifest-path",
+        default=None,
+        help="Optional manifest JSON path. Default: <histogram-out-dir>/histogram_build_manifest.json.",
+    )
+    parser.add_argument(
+        "--progress-log",
+        default=None,
+        help="Optional progress log path. Default: <histogram-out-dir>/histogram_build_progress.log.",
+    )
+    parser.add_argument(
+        "--state-path",
+        default=None,
+        help="Optional live state JSON path. Default: <histogram-out-dir>/histogram_build_state.json.",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=1000,
+        help="Print progress every N graphlet files. Default: 1000.",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="Worker processes for histogram writing. Default: 1.",
+    )
+    parser.add_argument("--num-bins", type=int, default=20, help="Number of bins per feature. Default: 20.")
+    parser.add_argument(
+        "--bin-width-factor",
+        type=float,
+        default=1.0,
+        help="Bin-width scaling factor for dynamic bin range estimation. Default: 1.0.",
+    )
+    parser.add_argument("--hist-density", action="store_true", help="Normalize histogram heights.")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Raise when graphlet features are missing from the bin-center definition.",
+    )
+    parser.add_argument(
+        "--recompute-bins",
+        action="store_true",
+        help="Recompute bin centers even when --bin-centers-path already exists.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip existing histogram files only when their stored build settings match.",
+    )
+    parser.add_argument("--fail-fast", action="store_true", help="Stop after the first graphlet histogram failure.")
+    return parser
+
+
+def build_histograms_main(argv: list[str] | None = None) -> None:
+    """
+    Run the graphlet JSON to histogram JSON build CLI.
+
+    Parameters
+    ----------
+    argv : list of str or None, optional
+        Command-line arguments to parse. If None, ``argparse`` reads from
+        ``sys.argv``.
+
+    Returns
+    -------
+    None
+        The histogram build manifest is written to stdout as formatted JSON.
+
+    Raises
+    ------
+    SystemExit
+        Raised when no graphlet inputs are provided or parsing fails.
+    RuntimeError
+        Raised when fail-fast mode is enabled and a graphlet fails.
+    """
+    args = build_histograms_parser().parse_args(argv)
+    graphlet_paths = collect_graphlet_json_paths(
+        graphlet_dirs=args.graphlet_dir,
+        graphlet_lists=args.graphlet_list,
+        graphlet_paths=args.graphlet_paths,
+        pattern=args.pattern,
+    )
+    reference_pattern = args.reference_pattern or args.pattern
+    reference_paths = collect_graphlet_json_paths(
+        graphlet_dirs=args.reference_graphlet_dir,
+        graphlet_lists=args.reference_graphlet_list,
+        graphlet_paths=args.reference_graphlet,
+        pattern=reference_pattern,
+    )
+    manifest = run_graphlet_histogram_build(
+        graphlet_paths=graphlet_paths,
+        histogram_out_dir=args.histogram_out_dir,
+        reference_graphlet_paths=reference_paths or None,
+        bin_centers_path=args.bin_centers_path,
+        manifest_path=args.manifest_path,
+        progress_log=args.progress_log,
+        state_path=args.state_path,
+        progress_every=args.progress_every,
+        max_workers=args.max_workers,
+        num_bins=args.num_bins,
+        bin_width_factor=args.bin_width_factor,
+        hist_density=args.hist_density,
+        strict=args.strict,
+        recompute_bins=args.recompute_bins,
+        resume=args.resume,
+        fail_fast=args.fail_fast,
+    )
+    print(json.dumps(manifest, indent=2))
+
+
 def compact_main(argv: list[str] | None = None) -> None:
     """
     Run the compact CIF-to-graphlet-to-histogram workflow CLI.
@@ -385,15 +566,36 @@ def build_main_parser() -> argparse.ArgumentParser:
     Returns
     -------
     argparse.ArgumentParser
-        Parser with the ``pipeline``, ``build-folder``, ``build-csv``, and
-        ``compact-workflow`` subcommands registered.
+        Parser with the ``pipeline``, ``build-folder``, ``build-csv``,
+        ``build-histograms``, and ``compact-workflow`` subcommands registered.
     """
     parser = argparse.ArgumentParser(description="graphlet-featurization command-line interface.")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("pipeline", help="Run the recommended CIF directory to histogram pipeline.")
-    subparsers.add_parser("build-folder", help="Build graphlet JSONs from a folder of CIF files.")
-    subparsers.add_parser("build-csv", help="Build graphlets and histograms from a CSV of CIF paths.")
-    subparsers.add_parser("compact-workflow", help="Run the end-to-end graphlet-to-histogram workflow.")
+    subparsers.add_parser(
+        "pipeline",
+        add_help=False,
+        help="Run the recommended CIF directory to histogram pipeline.",
+    )
+    subparsers.add_parser(
+        "build-folder",
+        add_help=False,
+        help="Build graphlet JSONs from a folder of CIF files.",
+    )
+    subparsers.add_parser(
+        "build-csv",
+        add_help=False,
+        help="Build graphlets and histograms from a CSV of CIF paths.",
+    )
+    subparsers.add_parser(
+        "build-histograms",
+        add_help=False,
+        help="Build histogram JSONs from existing graphlet JSON files.",
+    )
+    subparsers.add_parser(
+        "compact-workflow",
+        add_help=False,
+        help="Run the end-to-end graphlet-to-histogram workflow.",
+    )
     return parser
 
 
@@ -427,6 +629,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "build-csv":
         build_csv_main(remaining)
+        return
+    if args.command == "build-histograms":
+        build_histograms_main(remaining)
         return
     compact_main(remaining)
 

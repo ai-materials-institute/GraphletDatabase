@@ -23,6 +23,9 @@ ICSD_Features/
 
 # Generated graphlet artifacts
 Graphlets/
+Graphlet_Histograms/
+Graphlet_Histograms_Prototype/
+Graphlet_Histograms_Prototype_Parallel/
 
 # Test/coverage artifacts
 htmlcov/

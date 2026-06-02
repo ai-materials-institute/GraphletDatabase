@@ -166,6 +166,7 @@ dispatcher, which supports the same flags as the individual commands:
 ```bash
 uv run graphlet-featurization pipeline --input-dir ... --out-root ...
 uv run graphlet-featurization build-folder --input-dir ... --output-dir ...
+uv run graphlet-featurization build-histograms --graphlet-dir ... --histogram-out-dir ...
 uv run graphlet-featurization build-csv --csv-path ...
 uv run graphlet-featurization compact-workflow /path/to/a.cif ...
 ```
@@ -230,6 +231,49 @@ The folder build writes:
 
 Existing graphlet JSON files are skipped by default, so the command can be
 re-run after interruption.
+
+### Build histograms from existing graphlet JSONs
+
+After graphlet JSONs have been created, histograms can be built as a separate
+CLI stage:
+
+```bash
+uv run graphlet-featurization build-histograms \
+  --graphlet-dir /path/to/graphlets \
+  --histogram-out-dir /path/to/histograms \
+  --num-bins 20
+```
+
+Graphlet inputs can be provided by directory, path-list file, explicit paths,
+or any combination:
+
+```bash
+uv run graphlet-featurization build-histograms \
+  --graphlet-dir /path/to/graphlets \
+  --graphlet-list /path/to/extra_graphlets.txt \
+  /path/to/one_more_graphlet.json \
+  --histogram-out-dir /path/to/histograms
+```
+
+If `--bin-centers-path` is omitted, dynamic bin centers are derived for the run
+and written to `<histogram-out-dir>/bin_centers.json`. If a bin-center path is
+provided, it is reused when it exists, derived when missing, and overwritten
+only with `--recompute-bins`.
+
+For train/test workflows, specify reference graphlets used only for bin-center
+derivation:
+
+```bash
+uv run graphlet-featurization build-histograms \
+  --graphlet-dir /path/to/all_graphlets \
+  --reference-graphlet-list /path/to/train_graphlets.txt \
+  --bin-centers-path /path/to/bin_centers.json \
+  --histogram-out-dir /path/to/histograms
+```
+
+Directory scans are non-recursive. Existing histogram JSONs are overwritten by
+default. Use `--resume` to skip only existing histograms whose embedded build
+settings match the current bin-center fingerprint and histogram options.
 
 ### Monitor a running build
 
@@ -468,7 +512,7 @@ If one lengthscale is used per selected channel, pass a vector of length
 |---|---|---|
 | Graphlet JSON | `graphlet-build-folder`, `build_graphlet_payload_from_cif` | Stores per-material graphlets and compact value-count feature distributions. |
 | Bin-center JSON | `derive_dynamic_bin_centers` | Stores shared histogram channel names, bin centers, and bin edges. |
-| Histogram JSON | `batch_histogram_compact_feature_jsons` | Stores fixed-bin histogram descriptors for each material. |
+| Histogram JSON | `batch_histogram_compact_feature_jsons`, `run_graphlet_histogram_build` | Stores fixed-bin histogram descriptors for each material. |
 | Manifest JSON | batch workflows | Records paths, counts, timing, worker settings, and failures. |
 | State JSON | `run_folder_graphlet_build` | Tracks live progress for long-running graphlet builds. |
 
@@ -484,6 +528,7 @@ from core import (
     batch_build_graphlet_jsons,
     derive_dynamic_bin_centers,
     batch_histogram_compact_feature_jsons,
+    run_graphlet_histogram_build,
     run_graphlet_pipeline,
     run_folder_graphlet_build,
 )

@@ -18,18 +18,23 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import csv
+import hashlib
 import json
 import math
 import os
 import pickle
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from pymatgen.core import Structure as PMGStructure
 
 from graphlets import Create_Graphlets
+
+
+_HISTOGRAM_WORKER_BIN_PAYLOAD: Dict[str, Any] | None = None
+_HISTOGRAM_WORKER_BUILD_SETTINGS: Dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +264,87 @@ def collect_cif_paths(
     return collect_paths(root_dir, pattern=pattern, recursive=recursive, files_only=True)
 
 
+def _dedupe_preserve_order(paths: Iterable[str]) -> list[str]:
+    """
+    Return absolute paths with duplicates removed while preserving first use.
+
+    Parameters
+    ----------
+    paths : iterable of str
+        Path strings to normalize and de-duplicate.
+
+    Returns
+    -------
+    list of str
+        Absolute paths in first-seen order.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for path in paths:
+        resolved = resolve_path(path)
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(resolved)
+    return out
+
+
+def _read_path_list_file(path: str | os.PathLike[str]) -> list[str]:
+    """
+    Read newline-delimited paths, ignoring blank lines and comments.
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        Text file containing one path per line.
+
+    Returns
+    -------
+    list of str
+        Paths as written in the list file, with environment/user expansion
+        applied by callers.
+    """
+    with open(resolve_path(path), "r") as f:
+        return [line.strip() for line in f if line.strip() and not line.lstrip().startswith("#")]
+
+
+def collect_graphlet_json_paths(
+    *,
+    graphlet_dirs: Sequence[str] | None = None,
+    graphlet_lists: Sequence[str] | None = None,
+    graphlet_paths: Sequence[str] | None = None,
+    pattern: str = "*_graphlet.json",
+) -> list[str]:
+    """
+    Collect graphlet JSON paths from directories, list files, and explicit paths.
+
+    Directory scans are intentionally non-recursive. Directory matches are
+    sorted; list-file and explicit paths keep their provided order.
+
+    Parameters
+    ----------
+    graphlet_dirs : sequence of str or None, optional
+        Directories to scan for graphlet JSON files.
+    graphlet_lists : sequence of str or None, optional
+        Newline-delimited path-list files.
+    graphlet_paths : sequence of str or None, optional
+        Explicit graphlet JSON paths.
+    pattern : str, optional
+        Glob used for each directory scan. Default is ``"*_graphlet.json"``.
+
+    Returns
+    -------
+    list of str
+        Absolute, de-duplicated graphlet JSON paths.
+    """
+    collected: list[str] = []
+    for graphlet_dir in graphlet_dirs or []:
+        collected.extend(collect_paths(graphlet_dir, pattern=pattern, recursive=False, files_only=True))
+    for graphlet_list in graphlet_lists or []:
+        collected.extend(_read_path_list_file(graphlet_list))
+    collected.extend(graphlet_paths or [])
+    return _dedupe_preserve_order(collected)
+
+
 def write_json(path: str | os.PathLike[str], payload: dict, *, indent: int = 2) -> str:
     """
     Write a JSON payload to disk.
@@ -462,6 +548,132 @@ def _expand_pairs(pairs: Sequence[Sequence[float]]) -> np.ndarray:
     if values.size == 0:
         return np.array([], dtype=float)
     return np.repeat(values, counts.astype(int))
+
+
+def _weighted_percentile(values: np.ndarray, counts: np.ndarray, percentile: float) -> float:
+    """
+    Compute a percentile from compact value-count arrays.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        One-dimensional feature values.
+    counts : numpy.ndarray
+        Non-negative counts or weights for each value.
+    percentile : float
+        Percentile in the inclusive range ``[0, 100]``.
+
+    Returns
+    -------
+    float
+        Weighted percentile value.
+
+    Raises
+    ------
+    ValueError
+        If no positive-weight finite values are available.
+    """
+    values = np.asarray(values, dtype=float)
+    counts = np.asarray(counts, dtype=float)
+    mask = np.isfinite(values) & np.isfinite(counts) & (counts > 0)
+    values = values[mask]
+    counts = counts[mask]
+    if values.size == 0:
+        raise ValueError("Cannot compute weighted percentile from empty values.")
+
+    order = np.argsort(values)
+    values = values[order]
+    counts = counts[order]
+    cumulative = np.cumsum(counts)
+    threshold = float(percentile) / 100.0 * cumulative[-1]
+    idx = int(np.searchsorted(cumulative, threshold, side="left"))
+    idx = min(max(idx, 0), len(values) - 1)
+    return float(values[idx])
+
+
+def _pygraphlets_bin_width_from_counts(
+    values: np.ndarray,
+    counts: np.ndarray,
+    bin_width_factor: float = 1.0,
+) -> float:
+    """
+    Estimate dynamic histogram bin width from compact value-count arrays.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        One-dimensional feature values.
+    counts : numpy.ndarray
+        Counts or weights for each value.
+    bin_width_factor : float, optional
+        Multiplicative scale factor applied to the estimated width.
+
+    Returns
+    -------
+    float
+        Positive bin width.
+    """
+    values = np.asarray(values, dtype=float)
+    counts = np.asarray(counts, dtype=float)
+    mask = np.isfinite(values) & np.isfinite(counts) & (counts > 0)
+    values = values[mask]
+    counts = counts[mask]
+    if values.size == 0:
+        raise ValueError("Cannot derive a bin width from an empty feature value list.")
+
+    if len(np.unique(values)) == 1:
+        return 0.1
+
+    n = float(np.sum(counts))
+    iqr = _weighted_percentile(values, counts, 75) - _weighted_percentile(values, counts, 25)
+    if iqr > 0:
+        width = 2 * iqr / np.cbrt(n)
+    else:
+        sturges_width = (float(np.max(values)) - float(np.min(values))) / (np.log2(n) + 1)
+        width = sturges_width if sturges_width > 0 else 0.1
+    if width < 0.01:
+        width = 0.1
+    return float(width * bin_width_factor)
+
+
+def _pygraphlets_outer_edges_from_counts(
+    values: np.ndarray,
+    counts: np.ndarray,
+    bin_width_factor: float = 1.0,
+) -> np.ndarray:
+    """
+    Compute dynamic outer edges from compact value-count arrays.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        One-dimensional feature values.
+    counts : numpy.ndarray
+        Counts or weights for each value.
+    bin_width_factor : float, optional
+        Multiplicative scale factor for the estimated width.
+
+    Returns
+    -------
+    numpy.ndarray
+        One-dimensional array of outer bin edges.
+    """
+    values = np.asarray(values, dtype=float)
+    counts = np.asarray(counts, dtype=float)
+    mask = np.isfinite(values) & np.isfinite(counts) & (counts > 0)
+    values = values[mask]
+    counts = counts[mask]
+    if values.size == 0:
+        raise ValueError("Cannot derive edges from an empty feature value list.")
+
+    min_val = float(np.min(values))
+    max_val = float(np.max(values))
+    bin_width = _pygraphlets_bin_width_from_counts(
+        values,
+        counts,
+        bin_width_factor=bin_width_factor,
+    )
+    return np.arange(min_val - bin_width / 2, max_val + 3 * bin_width / 2, bin_width, dtype=float)
 
 
 def _pygraphlets_bin_width(values: np.ndarray, bin_width_factor: float = 1.0) -> float:
@@ -851,6 +1063,9 @@ def derive_dynamic_bin_centers(
     *,
     num_bins: int = 20,
     bin_width_factor: float = 1.0,
+    logger: ProgressLogger | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+    progress_every: int = 1000,
 ) -> Dict[str, Any]:
     """
     Derive dynamic histogram bin centers from compact graphlet JSON files.
@@ -867,6 +1082,12 @@ def derive_dynamic_bin_centers(
     bin_width_factor : float, optional
         Scale factor used when estimating the outer dynamic graphlet bin
         range. Default is 1.0.
+    logger : ProgressLogger or None, optional
+        Optional progress logger for large reference sets.
+    progress_callback : callable or None, optional
+        Optional callback receiving ``(completed, total)`` for state updates.
+    progress_every : int, optional
+        Number of graphlet files between progress messages. Default is 1000.
 
     Returns
     -------
@@ -874,12 +1095,22 @@ def derive_dynamic_bin_centers(
         Bin-center payload with feature names, bin centers, bin edges, padded
         2D centers, outer ranges, and provenance.
     """
-    aggregated: Dict[str, List[np.ndarray]] = {}
-    for path in compact_json_paths:
+    compact_json_paths = list(compact_json_paths)
+    progress_every = max(1, int(progress_every))
+    aggregated: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = {}
+    total_paths = len(compact_json_paths)
+    if logger:
+        logger.log(f"Deriving dynamic bin centers from {total_paths} graphlet JSON files")
+    for idx, path in enumerate(compact_json_paths, start=1):
         payload = _load_json(path)
         for feat_name, pairs in _iter_feature_items(payload):
-            expanded = _expand_pairs(pairs)
-            aggregated.setdefault(feat_name, []).append(expanded)
+            values, counts = _pairs_to_arrays(pairs)
+            if values.size:
+                aggregated.setdefault(feat_name, []).append((values, counts))
+        if logger and (idx == 1 or idx == total_paths or idx % progress_every == 0):
+            logger.log(f"{progress_step(idx, total_paths, 'Bin reference graphlets')} (features={len(aggregated)})")
+        if progress_callback and (idx == 1 or idx == total_paths or idx % progress_every == 0):
+            progress_callback(idx, total_paths)
 
     feature_names = sorted(aggregated.keys())
     bin_centers: Dict[str, List[float]] = {}
@@ -887,8 +1118,14 @@ def derive_dynamic_bin_centers(
     outer_ranges: Dict[str, List[float]] = {}
 
     for feat_name in feature_names:
-        values = np.concatenate(aggregated[feat_name]) if aggregated[feat_name] else np.array([], dtype=float)
-        outer_edges = _pygraphlets_outer_edges(values, bin_width_factor=bin_width_factor)
+        feat_pairs = aggregated[feat_name]
+        values = np.concatenate([pair_values for pair_values, _pair_counts in feat_pairs])
+        counts = np.concatenate([pair_counts for _pair_values, pair_counts in feat_pairs])
+        outer_edges = _pygraphlets_outer_edges_from_counts(
+            values,
+            counts,
+            bin_width_factor=bin_width_factor,
+        )
         edges = _fixed_count_edges_from_outer_range(outer_edges, num_bins=num_bins)
         centers = _edges_to_centers(edges)
         bin_edges[feat_name] = edges.tolist()
@@ -917,6 +1154,8 @@ def derive_dynamic_bin_centers(
     }
     if out_path is not None:
         write_json(out_path, payload, indent=2)
+        if logger:
+            logger.log(f"Wrote dynamic bin centers to {resolve_path(out_path)}")
     return payload
 
 
@@ -1197,6 +1436,527 @@ def batch_histogram_compact_feature_jsons(
         )
         out_paths.append(out_path)
     return out_paths
+
+
+def _bin_center_fingerprint(bin_center_payload: Dict[str, Any]) -> str:
+    """
+    Fingerprint the effective bin-center definition.
+
+    Parameters
+    ----------
+    bin_center_payload : dict
+        Loaded or derived bin-center payload.
+
+    Returns
+    -------
+    str
+        SHA256 digest for the binning content that controls histograms.
+    """
+    effective_payload = {
+        "binning_mode": bin_center_payload.get("binning_mode"),
+        "feature_names": bin_center_payload.get("feature_names", []),
+        "bin_centers": bin_center_payload.get("bin_centers", {}),
+        "bin_edges": bin_center_payload.get("bin_edges", {}),
+        "num_bins": bin_center_payload.get("num_bins"),
+        "range_strategy": bin_center_payload.get("range_strategy"),
+        "bin_width_factor": bin_center_payload.get("bin_width_factor"),
+    }
+    raw = json.dumps(effective_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _histogram_build_settings(
+    *,
+    bin_center_payload: Dict[str, Any],
+    hist_density: bool,
+    strict: bool,
+    num_bins: int,
+    bin_width_factor: float,
+) -> Dict[str, Any]:
+    """
+    Build the settings block used for histogram resume compatibility.
+
+    Parameters
+    ----------
+    bin_center_payload : dict
+        Loaded or derived bin-center payload.
+    hist_density : bool
+        Whether histogram heights are normalized.
+    strict : bool
+        Whether unknown compact features raise errors.
+    num_bins : int
+        Requested number of bins used when deriving new bin centers.
+    bin_width_factor : float
+        Requested dynamic range scale factor.
+
+    Returns
+    -------
+    dict
+        JSON-safe settings block.
+    """
+    return {
+        "histogram_builder_version": 1,
+        "bin_centers_fingerprint": _bin_center_fingerprint(bin_center_payload),
+        "hist_density": bool(hist_density),
+        "strict": bool(strict),
+        "num_bins": int(num_bins),
+        "bin_width_factor": float(bin_width_factor),
+    }
+
+
+def _histogram_settings_match(path: str, expected_settings: Dict[str, Any]) -> bool:
+    """
+    Return True when an existing histogram has compatible build settings.
+
+    Parameters
+    ----------
+    path : str
+        Existing histogram JSON path.
+    expected_settings : dict
+        Current build settings.
+
+    Returns
+    -------
+    bool
+        True if the existing file can be safely reused.
+    """
+    try:
+        payload = _load_json(path)
+    except Exception:
+        return False
+    return payload.get("build_settings") == expected_settings
+
+
+def _histogram_worker_init(bin_centers_path: str, build_settings: Dict[str, Any]) -> None:
+    """
+    Initialize per-process histogram build state.
+
+    Parameters
+    ----------
+    bin_centers_path : str
+        Bin-center JSON or pickle path.
+    build_settings : dict
+        Build settings to embed in each histogram JSON.
+
+    Returns
+    -------
+    None
+    """
+    global _HISTOGRAM_WORKER_BIN_PAYLOAD
+    global _HISTOGRAM_WORKER_BUILD_SETTINGS
+    _HISTOGRAM_WORKER_BIN_PAYLOAD = load_predefined_bin_centers(bin_centers_path, fmt="auto")
+    _HISTOGRAM_WORKER_BUILD_SETTINGS = build_settings
+
+
+def _histogram_build_worker(job: Tuple[str, str, str, bool, bool]) -> Dict[str, Any]:
+    """
+    Build one histogram JSON in a worker process.
+
+    Parameters
+    ----------
+    job : tuple
+        ``(graphlet_path, out_path, bin_centers_path, hist_density, strict)``.
+
+    Returns
+    -------
+    dict
+        Worker result with success or failure metadata.
+    """
+    graphlet_path, out_path, bin_centers_path, hist_density, strict = job
+    start = time.time()
+    try:
+        bin_payload = _HISTOGRAM_WORKER_BIN_PAYLOAD
+        build_settings = _HISTOGRAM_WORKER_BUILD_SETTINGS
+        if bin_payload is None or build_settings is None:
+            bin_payload = load_predefined_bin_centers(bin_centers_path, fmt="auto")
+            build_settings = _histogram_build_settings(
+                bin_center_payload=bin_payload,
+                hist_density=hist_density,
+                strict=strict,
+                num_bins=int(bin_payload.get("num_bins", 0) or 0),
+                bin_width_factor=float(bin_payload.get("bin_width_factor", 1.0) or 1.0),
+            )
+
+        compact_payload = _load_json(graphlet_path)
+        hist_payload = histogram_compact_feature_payload(
+            compact_payload,
+            bin_payload,
+            hist_density=hist_density,
+            strict=strict,
+        )
+        hist_payload["build_settings"] = build_settings
+        hist_payload["source_graphlet_path"] = resolve_path(graphlet_path)
+        hist_payload["bin_centers_path"] = resolve_path(bin_centers_path)
+        write_json(out_path, hist_payload, indent=2)
+        return {
+            "ok": True,
+            "graphlet_path": resolve_path(graphlet_path),
+            "out_path": resolve_path(out_path),
+            "elapsed_s": time.time() - start,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "graphlet_path": resolve_path(graphlet_path),
+            "out_path": resolve_path(out_path),
+            "elapsed_s": time.time() - start,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+
+
+def run_graphlet_histogram_build(
+    *,
+    graphlet_paths: Sequence[str],
+    histogram_out_dir: str,
+    reference_graphlet_paths: Sequence[str] | None = None,
+    bin_centers_path: str | None = None,
+    manifest_path: str | None = None,
+    progress_log: str | None = None,
+    state_path: str | None = None,
+    progress_every: int = 1000,
+    max_workers: int = 1,
+    num_bins: int = 20,
+    bin_width_factor: float = 1.0,
+    hist_density: bool = False,
+    strict: bool = False,
+    recompute_bins: bool = False,
+    resume: bool = False,
+    fail_fast: bool = False,
+) -> Dict[str, Any]:
+    """
+    Build histogram JSON files from existing graphlet JSON files.
+
+    Parameters
+    ----------
+    graphlet_paths : sequence of str
+        Graphlet JSON files to convert to histograms.
+    histogram_out_dir : str
+        Directory where histogram JSON files are written.
+    reference_graphlet_paths : sequence of str or None, optional
+        Optional graphlet JSON files used only to derive bin centers.
+    bin_centers_path : str or None, optional
+        Bin-center JSON path to reuse or write. If None, a default
+        ``bin_centers.json`` is written under ``histogram_out_dir`` and bins
+        are derived dynamically for this run.
+    manifest_path : str or None, optional
+        Manifest path. Defaults to
+        ``<histogram_out_dir>/histogram_build_manifest.json``.
+    progress_log : str or None, optional
+        Progress log path. Defaults to
+        ``<histogram_out_dir>/histogram_build_progress.log``.
+    state_path : str or None, optional
+        Live state JSON path. Defaults to
+        ``<histogram_out_dir>/histogram_build_state.json``.
+    progress_every : int, optional
+        Number of graphlet files between progress messages. Default is 1000.
+    max_workers : int, optional
+        Number of worker processes for histogram writing. Default is 1.
+    num_bins : int, optional
+        Number of bins used when deriving dynamic bins. Default is 20.
+    bin_width_factor : float, optional
+        Dynamic range scale factor. Default is 1.0.
+    hist_density : bool, optional
+        If True, normalize histogram heights. Default is False.
+    strict : bool, optional
+        If True, raise when a graphlet has features without bins.
+    recompute_bins : bool, optional
+        If True, rebuild ``bin_centers_path`` even if it exists.
+    resume : bool, optional
+        If True, skip existing histograms only when their build settings match.
+    fail_fast : bool, optional
+        If True, stop at the first histogram build failure.
+
+    Returns
+    -------
+    dict
+        Manifest summarizing inputs, bin-center provenance, outputs, skipped
+        files, failures, and build settings.
+
+    Raises
+    ------
+    SystemExit
+        If no graphlet inputs or no bin-reference graphlets are available.
+    RuntimeError
+        If ``fail_fast`` is True and a graphlet fails.
+    """
+    graphlet_paths = _dedupe_preserve_order(graphlet_paths)
+    if not graphlet_paths:
+        raise SystemExit("No graphlet JSON files were specified for histogram building.")
+
+    histogram_out_dir = ensure_dir(histogram_out_dir)
+    manifest_path = resolve_path(manifest_path) if manifest_path else os.path.join(
+        histogram_out_dir, "histogram_build_manifest.json"
+    )
+    progress_log = resolve_path(progress_log) if progress_log else os.path.join(
+        histogram_out_dir, "histogram_build_progress.log"
+    )
+    state_path = resolve_path(state_path) if state_path else os.path.join(
+        histogram_out_dir, "histogram_build_state.json"
+    )
+    progress_every = max(1, int(progress_every))
+    max_workers_eff = max(1, min(int(max_workers), int(os.cpu_count() or 1)))
+    logger = ProgressLogger(progress_log)
+    start_epoch = time.time()
+
+    def _write_histogram_state(
+        *,
+        status: str,
+        phase: str,
+        num_written: int = 0,
+        num_skipped: int = 0,
+        num_failed: int = 0,
+        current_index: int = 0,
+        total_items: int | None = None,
+        failures: list[dict[str, str]] | None = None,
+    ) -> None:
+        elapsed_s = time.time() - start_epoch
+        total = len(graphlet_paths) if total_items is None else int(total_items)
+        completed = int(current_index)
+        pending = max(0, total - completed)
+        rate = (completed * 60.0 / elapsed_s) if elapsed_s > 0 else 0.0
+        eta_s = (pending / (completed / elapsed_s)) if completed > 0 and elapsed_s > 0 else None
+        payload = {
+            "status": status,
+            "phase": phase,
+            "last_update": timestamp(),
+            "histogram_out_dir": histogram_out_dir,
+            "manifest_path": manifest_path,
+            "progress_log": progress_log,
+            "state_path": state_path,
+            "bin_centers_path": resolve_path(bin_centers_path) if bin_centers_path else None,
+            "counts": {
+                "num_graphlet_jsons": len(graphlet_paths),
+                "num_reference_graphlets": len(reference_graphlet_paths or []),
+                "num_current_phase_total": total,
+                "num_current_phase_completed": completed,
+                "num_current_phase_pending": pending,
+                "num_histograms_written": int(num_written),
+                "num_histograms_skipped": int(num_skipped),
+                "num_histograms_failed": int(num_failed),
+            },
+            "settings": {
+                "num_bins": int(num_bins),
+                "bin_width_factor": float(bin_width_factor),
+                "hist_density": bool(hist_density),
+                "strict": bool(strict),
+                "resume": bool(resume),
+                "fail_fast": bool(fail_fast),
+                "recompute_bins": bool(recompute_bins),
+                "max_workers": int(max_workers_eff),
+            },
+            "timing": {
+                "elapsed_seconds": elapsed_s,
+                "elapsed_human": _format_duration(elapsed_s),
+                "rate_items_per_min": rate,
+                "eta_seconds": eta_s,
+                "eta_human": _format_duration(eta_s),
+            },
+            "recent_failures": (failures or [])[-50:],
+        }
+        write_json_atomic(state_path, payload, indent=2)
+
+    logger.log("Starting graphlet histogram build")
+    logger.log(f"Histogram input graphlets: {len(graphlet_paths)}")
+    logger.log(f"Histogram output dir: {histogram_out_dir}")
+    _write_histogram_state(status="starting", phase="setup")
+
+    if bin_centers_path is None:
+        bin_centers_path = os.path.join(histogram_out_dir, "bin_centers.json")
+        derive_bins = True
+        bin_source = "derived_default"
+    else:
+        bin_centers_path = resolve_path(bin_centers_path)
+        derive_bins = bool(recompute_bins) or not os.path.exists(bin_centers_path)
+        bin_source = "recomputed" if recompute_bins else ("derived" if derive_bins else "reused")
+
+    if derive_bins:
+        reference_paths = _dedupe_preserve_order(reference_graphlet_paths or graphlet_paths)
+        if not reference_paths:
+            raise SystemExit("No reference graphlet JSON files are available for bin-center derivation.")
+        _write_histogram_state(
+            status="running",
+            phase="deriving_bin_centers",
+            total_items=len(reference_paths),
+        )
+        bin_payload = derive_dynamic_bin_centers(
+            reference_paths,
+            out_path=bin_centers_path,
+            num_bins=num_bins,
+            bin_width_factor=bin_width_factor,
+            logger=logger,
+            progress_callback=lambda completed, total: _write_histogram_state(
+                status="running",
+                phase="deriving_bin_centers",
+                total_items=total,
+                current_index=completed,
+                failures=[],
+            ),
+            progress_every=progress_every,
+        )
+    else:
+        reference_paths = _dedupe_preserve_order(reference_graphlet_paths or [])
+        logger.log(f"Reusing existing bin centers from {bin_centers_path}")
+        bin_payload = load_predefined_bin_centers(bin_centers_path, fmt="auto")
+
+    build_settings = _histogram_build_settings(
+        bin_center_payload=bin_payload,
+        hist_density=hist_density,
+        strict=strict,
+        num_bins=num_bins,
+        bin_width_factor=bin_width_factor,
+    )
+
+    histogram_paths: list[str] = []
+    skipped_paths: list[str] = []
+    rebuilt_paths: list[str] = []
+    failures: list[dict[str, str]] = []
+    logger.log(
+        "Histogram settings: "
+        f"num_bins={int(num_bins)}, bin_width_factor={float(bin_width_factor)}, "
+        f"hist_density={bool(hist_density)}, resume={bool(resume)}, max_workers={max_workers_eff}"
+    )
+    logger.log(f"Building histograms for {len(graphlet_paths)} graphlet JSON files")
+
+    jobs: list[tuple[str, str, str, bool, bool]] = []
+    for graphlet_path in graphlet_paths:
+        out_path = os.path.join(histogram_out_dir, f"{Path(graphlet_path).stem}_histogram.json")
+        if resume and os.path.exists(out_path) and _histogram_settings_match(out_path, build_settings):
+            histogram_paths.append(resolve_path(out_path))
+            skipped_paths.append(resolve_path(out_path))
+            continue
+        jobs.append((graphlet_path, out_path, bin_centers_path, bool(hist_density), bool(strict)))
+
+    if skipped_paths:
+        logger.log(f"Resume-compatible histograms skipped before submission: {len(skipped_paths)}")
+
+    def _handle_histogram_result(result: Dict[str, Any], completed_count: int) -> bool:
+        if result.get("ok"):
+            histogram_paths.append(str(result["out_path"]))
+            rebuilt_paths.append(str(result["out_path"]))
+        else:
+            failure = {
+                "graphlet_path": str(result.get("graphlet_path", "")),
+                "out_path": str(result.get("out_path", "")),
+                "error_type": str(result.get("error_type", "RuntimeError")),
+                "error": str(result.get("error", "Unknown error")),
+            }
+            failures.append(failure)
+            logger.log(
+                "FAILED "
+                f"{failure['graphlet_path']}: {failure['error_type']}: {failure['error']}"
+            )
+            if fail_fast:
+                return False
+
+        if (
+            completed_count == 1
+            or completed_count == len(graphlet_paths)
+            or completed_count % progress_every == 0
+        ):
+            logger.log(
+                f"{progress_step(completed_count, len(graphlet_paths), 'Histograms')} "
+                f"(written={len(rebuilt_paths)}, skipped={len(skipped_paths)}, failed={len(failures)})"
+            )
+            _write_histogram_state(
+                status="running",
+                phase="building_histograms",
+                num_written=len(rebuilt_paths),
+                num_skipped=len(skipped_paths),
+                num_failed=len(failures),
+                current_index=completed_count,
+                failures=failures,
+            )
+        return True
+
+    completed_histogram_count = len(skipped_paths)
+    if jobs and max_workers_eff > 1:
+        logger.log(f"Submitting {len(jobs)} histogram jobs to {max_workers_eff} worker processes")
+        with cf.ProcessPoolExecutor(
+            max_workers=max_workers_eff,
+            initializer=_histogram_worker_init,
+            initargs=(bin_centers_path, build_settings),
+        ) as executor:
+            for result in executor.map(_histogram_build_worker, jobs, chunksize=10):
+                completed_histogram_count += 1
+                if not _handle_histogram_result(result, completed_histogram_count):
+                    break
+    else:
+        for job in jobs:
+            result = _histogram_build_worker(job)
+            completed_histogram_count += 1
+            if not _handle_histogram_result(result, completed_histogram_count):
+                break
+
+    if skipped_paths and not jobs:
+        logger.log(
+            f"{progress_step(len(graphlet_paths), len(graphlet_paths), 'Histograms')} "
+            f"(written={len(rebuilt_paths)}, skipped={len(skipped_paths)}, failed={len(failures)})"
+        )
+        _write_histogram_state(
+            status="running",
+            phase="building_histograms",
+            num_written=len(rebuilt_paths),
+            num_skipped=len(skipped_paths),
+            num_failed=len(failures),
+            current_index=len(graphlet_paths),
+            failures=failures,
+        )
+
+    elapsed_s = time.time() - start_epoch
+    manifest = {
+        "histogram_out_dir": histogram_out_dir,
+        "manifest_path": manifest_path,
+        "progress_log": progress_log,
+        "state_path": state_path,
+        "graphlet_paths": graphlet_paths,
+        "reference_graphlet_paths": reference_paths,
+        "bin_centers_path": resolve_path(bin_centers_path),
+        "bin_centers_source": bin_source,
+        "build_settings": build_settings,
+        "num_graphlet_jsons": len(graphlet_paths),
+        "num_reference_graphlets": len(reference_paths),
+        "num_histogram_jsons": len(histogram_paths),
+        "num_histograms_written": len(rebuilt_paths),
+        "num_histograms_skipped": len(skipped_paths),
+        "num_histograms_failed": len(failures),
+        "histogram_paths": histogram_paths,
+        "written_histogram_paths": rebuilt_paths,
+        "skipped_histogram_paths": skipped_paths,
+        "failures": failures,
+        "resume": bool(resume),
+        "fail_fast": bool(fail_fast),
+        "recompute_bins": bool(recompute_bins),
+        "num_bins": int(num_bins),
+        "bin_width_factor": float(bin_width_factor),
+        "hist_density": bool(hist_density),
+        "strict": bool(strict),
+        "elapsed_seconds": elapsed_s,
+        "elapsed_human": _format_duration(elapsed_s),
+    }
+    write_json(manifest_path, manifest, indent=2)
+    final_status = "failed" if fail_fast and failures else "completed"
+    _write_histogram_state(
+        status=final_status,
+        phase="finished",
+        num_written=len(rebuilt_paths),
+        num_skipped=len(skipped_paths),
+        num_failed=len(failures),
+        current_index=len(graphlet_paths),
+        failures=failures,
+    )
+    logger.log(f"Wrote manifest to {manifest_path}")
+    logger.log(
+        "Histogram build completed "
+        f"(written={len(rebuilt_paths)}, skipped={len(skipped_paths)}, failed={len(failures)})"
+    )
+
+    if fail_fast and failures:
+        raise RuntimeError(
+            "Fail-fast triggered after a graphlet histogram failure. "
+            f"See manifest for details: {manifest_path}"
+        )
+    return manifest
 
 
 def run_full_graphlet_histogram_workflow(
@@ -2189,6 +2949,7 @@ __all__ = [
     "progress_step",
     "collect_paths",
     "collect_cif_paths",
+    "collect_graphlet_json_paths",
     "write_json",
     "write_json_atomic",
     # graphlet featurization
@@ -2203,6 +2964,7 @@ __all__ = [
     "histogram_compact_feature_payload",
     "histogram_compact_feature_json",
     "batch_histogram_compact_feature_jsons",
+    "run_graphlet_histogram_build",
     "run_full_graphlet_histogram_workflow",
     # batch runners
     "run_graphlet_pipeline",
