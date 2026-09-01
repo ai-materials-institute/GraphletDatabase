@@ -21,6 +21,9 @@ Thumbs.db
 tmp/
 ICSD_Features/
 
+# Input structure data (large; not distributed with the source repo)
+data/
+
 # Generated graphlet artifacts
 Graphlets/
 Graphlet_Histograms/

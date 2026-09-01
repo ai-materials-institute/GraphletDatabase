@@ -777,3 +777,7 @@ def _repo_root() -> Path:
         Repository root path, computed relative to ``src/cli.py``.
     """
     return Path(__file__).resolve().parents[2]
+
+
+if __name__ == "__main__":
+    main()
