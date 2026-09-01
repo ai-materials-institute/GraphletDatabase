@@ -411,7 +411,6 @@ class Create_Graphlets:
     
         all_triplets = defaultdict(dict)
         seen_triplets = set()
-        graphlets_record=set()
         for i, site in enumerate(self.structure.sites):
             neighb_data=self.neighb_data[i]
             
@@ -458,19 +457,8 @@ class Create_Graphlets:
             
                     triplet_tuple = (label_i, sorted_pair_labels,sorted_pair_dists , round(angle_jk/10)*10)
                     
-                    tuple_atom_i = tuple(atom_i.items())  # [('C0+', 1.0)]
-                    tuple_atom_j = tuple(atom_j.items())
-                    tuple_atom_k = tuple(atom_k.items())
-                    atom_set = frozenset([tuple_atom_i, tuple_atom_j, tuple_atom_k])  # element identities (unordered)
-                    coord_x_set = frozenset([coord_i[0], coord_j[0], coord_k[0]])
-                    coord_y_set = frozenset([coord_i[1], coord_j[1], coord_k[1]])
-                    coord_z_set = frozenset([coord_i[2], coord_j[2], coord_k[2]])
-                    graphlet_key = (atom_set, coord_x_set, coord_y_set, coord_z_set) 
-                    
-        
-                    if (triplet_tuple not in seen_triplets) and (graphlet_key not in graphlets_record):
+                    if triplet_tuple not in seen_triplets:
                         seen_triplets.add(triplet_tuple)
-                        graphlets_record.add(graphlet_key)
                         triplet = {
                             'g_order':3,
                             'atom': atom_i, #composition of central atom
@@ -486,8 +474,7 @@ class Create_Graphlets:
                         }
             
                         all_triplets[triplet_tuple]=triplet
-                    elif graphlet_key not in graphlets_record:
-                        graphlets_record.add(graphlet_key)
+                    else:
                         all_triplets[triplet_tuple]['count']+=1
         self.three_site_graphlets=list(all_triplets.values())
         return None           
