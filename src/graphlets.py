@@ -370,7 +370,7 @@ class Create_Graphlets:
         -----
         For each center site, all unordered neighbor pairs form a triplet.
         Distances and angles are computed; three distances and three angles
-        are sorted. A coarse angle bucket (round(angle_jk / 10) * 10) is
+        are sorted. An angle bucket at 1 degree resolution (round(angle_jk)) is
         used in the triplet key. Counts are aggregated over unique keys.
 
         Returns
@@ -455,7 +455,7 @@ class Create_Graphlets:
                     sorted_pair_labels = (sorted_pairs[0][0], sorted_pairs[1][0])
                     sorted_pair_dists = (round(sorted_pairs[0][1],1), round(sorted_pairs[1][1],1))
             
-                    triplet_tuple = (label_i, sorted_pair_labels,sorted_pair_dists , round(angle_jk/10)*10)
+                    triplet_tuple = (label_i, sorted_pair_labels,sorted_pair_dists , round(angle_jk))
                     
                     if triplet_tuple not in seen_triplets:
                         seen_triplets.add(triplet_tuple)
