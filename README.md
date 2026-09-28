@@ -570,10 +570,26 @@ on the repository.
 
 ## Citing
 
-The accompanying paper is in preparation. Once published, a full citation will
-be added here. In the meantime, if you use this repository in published work,
-please include the repository URL and the commit hash or version tag used to
-generate your results.
+If you use this repository in published work, please cite:
+
+A. Panigrahi, Y. Liu, O. Lesser, K. Mallayya, and E.-A. Kim,
+"Graphlet Histogram Representation Database of Inorganic Crystals",
+arXiv:2606.10195 (2026). https://arxiv.org/abs/2606.10195
+
+```bibtex
+@misc{panigrahi2026graphlet,
+  title         = {Graphlet Histogram Representation Database of Inorganic Crystals},
+  author        = {Panigrahi, Aaditya and Liu, Yanjun and Lesser, Omri and Mallayya, Krishnanand and Kim, Eun-Ah},
+  year          = {2026},
+  eprint        = {2606.10195},
+  archivePrefix = {arXiv},
+  doi           = {10.48550/arXiv.2606.10195},
+  url           = {https://arxiv.org/abs/2606.10195}
+}
+```
+
+Please also record the commit hash or version tag used to generate your
+results.
 
 ## License
 
