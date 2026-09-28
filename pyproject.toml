@@ -45,12 +45,12 @@ Issues = "https://github.com/ai-materials-institute/GraphletDatabase/issues"
 Paper = "https://arxiv.org/abs/2606.10195"
 
 [project.scripts]
-graphlet-featurization = "cli:main"
-graphlet-pipeline = "cli:pipeline_main"
-graphlet-build-folder = "cli:build_folder_main"
-graphlet-build-csv = "cli:build_csv_main"
-graphlet-compact-workflow = "cli:compact_main"
+graphlet-featurization = "graphlet_cli:main"
+graphlet-pipeline = "graphlet_cli:pipeline_main"
+graphlet-build-folder = "graphlet_cli:build_folder_main"
+graphlet-build-csv = "graphlet_cli:build_csv_main"
+graphlet-compact-workflow = "graphlet_cli:compact_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["graphlets", "core", "emd", "cli"]
+py-modules = ["graphlets", "graphlet_core", "graphlet_emd", "graphlet_cli"]

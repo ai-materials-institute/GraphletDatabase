@@ -62,10 +62,10 @@ three sites of each attribute, and of the triangle bond lengths and angles).
 
 ```text
 src/
-    graphlets.py    Graphlet construction and graphlet-to-histogram analyzers
-    core.py         Graphlet, histogram, bin-center, and batch workflow utilities
-    emd.py          EMD vectors, scalar distances, kernels, and tensor adapters
-    cli.py          Command-line entrypoints
+    graphlets.py      Graphlet construction and graphlet-to-histogram analyzers
+    graphlet_core.py  Graphlet, histogram, bin-center, and batch workflow utilities
+    graphlet_emd.py   EMD vectors, scalar distances, kernels, and tensor adapters
+    graphlet_cli.py   Command-line entrypoints
 
 config/
     atomic_radii.json
@@ -123,7 +123,7 @@ Check the environment:
 ```bash
 uv run graphlet-pipeline --help
 uv run graphlet-build-folder --help
-uv run python -c "from core import run_graphlet_pipeline; from emd import load_histogram_collection; print('ok')"
+uv run python -c "from graphlet_core import run_graphlet_pipeline; from graphlet_emd import load_histogram_collection; print('ok')"
 ```
 
 ## Quickstart
@@ -153,7 +153,7 @@ Then load the histograms and compute distances:
 ```python
 import json
 from pathlib import Path
-from emd import (
+from graphlet_emd import (
     load_histogram_collection,
     pairwise_material_emd_vectors,
     reduce_selected_emd_vectors,
@@ -388,7 +388,7 @@ The Python API exposes the same staged workflow used by the command-line tools.
 ### One-call pipeline helper
 
 ```python
-from core import run_graphlet_pipeline
+from graphlet_core import run_graphlet_pipeline
 
 manifest = run_graphlet_pipeline(
     input_dir="/path/to/cifs",
@@ -403,7 +403,7 @@ The returned manifest contains `graphlet_paths`, `histogram_paths`,
 ### 1. Build graphlets for a CIF collection
 
 ```python
-from core import run_folder_graphlet_build
+from graphlet_core import run_folder_graphlet_build
 
 manifest = run_folder_graphlet_build(
     input_dir="/path/to/cifs",
@@ -419,7 +419,7 @@ graphlet_paths = manifest["graphlet_paths"]
 ### 2. Derive shared histogram bins from all graphlets or a subset
 
 ```python
-from core import derive_dynamic_bin_centers
+from graphlet_core import derive_dynamic_bin_centers
 
 # Use all graphlets, or replace this with a training/reference subset.
 reference_graphlets = graphlet_paths
@@ -437,7 +437,7 @@ For train/test workflows, derive bins from the training set and reuse the saved
 ### 3. Build histogram JSONs with the shared bins
 
 ```python
-from core import batch_histogram_compact_feature_jsons
+from graphlet_core import batch_histogram_compact_feature_jsons
 
 histogram_paths = batch_histogram_compact_feature_jsons(
     graphlet_paths,
@@ -457,7 +457,7 @@ The last axis stores `[bin_center, height]`.
 ### 4. Load histogram tensors
 
 ```python
-from emd import load_histogram_collection
+from graphlet_emd import load_histogram_collection
 
 hist_names, histograms, payloads = load_histogram_collection(histogram_paths)
 
@@ -467,7 +467,7 @@ hist_names, histograms, payloads = load_histogram_collection(histogram_paths)
 ### 5. Compute an EMD vector between two materials
 
 ```python
-from emd import material_emd_vector
+from graphlet_emd import material_emd_vector
 
 i, j = 0, 1
 emd_vec = material_emd_vector(histograms[i], histograms[j])
@@ -480,7 +480,7 @@ The entry `emd_vec[k]` is the EMD for histogram channel `hist_names[k]`.
 ### 6. Compute all-pairs EMD vectors
 
 ```python
-from emd import pairwise_material_emd_vectors
+from graphlet_emd import pairwise_material_emd_vectors
 
 all_emd_vecs = pairwise_material_emd_vectors(histograms, histograms)
 
@@ -493,7 +493,7 @@ reductions, weights, or kernels.
 ### 7. Reduce selected channels into material distances
 
 ```python
-from emd import reduce_selected_emd_vectors
+from graphlet_emd import reduce_selected_emd_vectors
 
 selected_names = [
     "bond_len_2_ord",
@@ -526,7 +526,7 @@ can be passed with `weights=...`.
 ### 8. Build a kernel from selected EMD channels
 
 ```python
-from emd import kernel_from_selected_emd_vectors, histogram_channel_indices, pairwise_emd_kernel
+from graphlet_emd import kernel_from_selected_emd_vectors, histogram_channel_indices, pairwise_emd_kernel
 
 # Option A: kernel from cached all-pairs EMD vectors.
 K = kernel_from_selected_emd_vectors(
@@ -564,7 +564,7 @@ If one lengthscale is used per selected channel, pass a vector of length
 
 ```python
 from graphlets import Create_Graphlets, Graphlet_Analyzer, Graphlet_AnalyzerFixedBins2D
-from core import (
+from graphlet_core import (
     build_graphlet_payload_from_cif,
     batch_build_graphlet_jsons,
     derive_dynamic_bin_centers,
@@ -573,7 +573,7 @@ from core import (
     run_graphlet_pipeline,
     run_folder_graphlet_build,
 )
-from emd import (
+from graphlet_emd import (
     load_histogram_collection,
     histogram_payload_to_tensor,
     histogram_channel_indices,

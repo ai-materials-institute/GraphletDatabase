@@ -20,7 +20,7 @@ import json
 import os
 from pathlib import Path
 
-from core import (
+from graphlet_core import (
     collect_graphlet_json_paths,
     run_csv_graphlet_histogram_build,
     run_folder_graphlet_build,
@@ -778,7 +778,7 @@ def _repo_root() -> Path:
     Returns
     -------
     pathlib.Path
-        Repository root path, computed relative to ``src/cli.py``.
+        Repository root path, computed relative to ``src/graphlet_cli.py``.
     """
     return Path(__file__).resolve().parents[2]
 

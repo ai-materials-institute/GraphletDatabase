@@ -24,7 +24,7 @@ import numpy as np
 import ot
 import torch
 
-from core import (
+from graphlet_core import (
     DEFAULT_ATOMIC_FEATURES_JSON,
     DEFAULT_ATOMIC_RADII_JSON,
     DEFAULT_CLASSIFICATION_BIN_PICKLE,
