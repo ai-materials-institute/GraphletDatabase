@@ -3,8 +3,13 @@
 Graphlet featurization utilities for crystalline materials represented as CIF
 files.
 
-This repository accompanies work on graphlet-based featurization of crystalline
-materials. It converts crystal structures into local 1-site, 2-site, and
+This is the code accompanying *Graphlet Histogram Representation Database of
+Inorganic Crystals* ([arXiv:2606.10195](https://arxiv.org/abs/2606.10195)). The
+precomputed database built with it, Graphlet-MP (149,082 Materials Project
+structures), is available on Zenodo:
+[10.5281/zenodo.20532978](https://doi.org/10.5281/zenodo.20532978).
+
+The package converts crystal structures into local 1-site, 2-site, and
 3-site graphlet descriptors, aggregates those descriptors into shared-bin
 histograms, and compares materials with Earth Mover's Distance (EMD) vectors,
 scalar distances, and exponential kernels.
@@ -31,6 +36,28 @@ live state files for long-running batch jobs.
 - **Batch execution utilities** with resumable folder processing, progress
   logs, state checkpoints, and manifest files.
 
+## Graphlet Definitions
+
+Each structure is reduced to its primitive cell. Neighbors are found by Voronoi
+tessellation: a contact is kept when its Voronoi face weight is at least
+`1e-2` and the interatomic distance is less than 1.5 times the sum of the two
+atomic radii. Structures with any neighbor distance below 1 Å are rejected.
+
+- **1-site graphlets** are the distinct site compositions, with their counts.
+- **2-site graphlets** are bonded pairs, keyed by the two site labels and the
+  distance rounded to 0.1 Å.
+- **3-site graphlets** are a center site with two of its neighbors, keyed by the
+  center label, the two neighbor labels, the two center-to-neighbor distances
+  rounded to 0.1 Å, and the apex angle rounded to 10°. Every pair of neighbors of
+  every site is counted, so the total per structure is the sum of
+  C(degree, 2) over sites.
+
+Ten elemental attributes (`config/Filtered_atomic_features.json`) are attached
+to each graphlet and summarized into 79 histogram channels: 10 first-order, 21
+second-order (pair mean and absolute difference of each attribute, plus bond
+length), and 48 third-order (mean, standard deviation, skewness, and kurtosis over the
+three sites of each attribute, and of the triangle bond lengths and angles).
+
 ## Repository Layout
 
 ```text
@@ -45,6 +72,7 @@ config/
     Filtered_atomic_features.json
     Space_group.xls
 
+LICENSE             MIT License
 pyproject.toml      Package metadata, dependencies, and console scripts
 requirements.txt    Unpinned dependency list for pip users (uv sync is preferred)
 ```
@@ -57,9 +85,11 @@ included under `config/`.
 
 ## Installation
 
-The recommended setup uses `uv`.
+Clone the repository, then install with `uv` (recommended):
 
 ```bash
+git clone https://github.com/ai-materials-institute/GraphletDatabase.git
+cd GraphletDatabase
 uv sync
 ```
 
@@ -68,7 +98,13 @@ uv sync
 editable install is useful because workflows resolve configuration files
 relative to the repository root.
 
-The package requires Python ≥ 3.10. To pin explicitly:
+Alternatively, install into an existing environment with `pip`:
+
+```bash
+pip install -e .
+```
+
+The package requires Python ≥ 3.10. To pin explicitly with `uv`:
 
 ```bash
 uv python install 3.10
@@ -278,10 +314,11 @@ settings match the current bin-center fingerprint and histogram options.
 ### Monitor a running build
 
 The progress log is only written when `--progress-log` is passed to
-`graphlet-build-folder`. If you started the build with that flag:
+`graphlet-build-folder`. If you started the build with
+`--progress-log /path/to/progress.log`:
 
 ```bash
-tail -f /path/to/graphlets/graphlet_build_progress.log
+tail -f /path/to/progress.log
 ```
 
 One-shot state-file summary (always available; the state file is written
@@ -516,9 +553,6 @@ If one lengthscale is used per selected channel, pass a vector of length
 | Manifest JSON | batch workflows | Records paths, counts, timing, worker settings, and failures. |
 | State JSON | `run_folder_graphlet_build` | Tracks live progress for long-running graphlet builds. |
 
-Generated output directories such as `Graphlets/` and `ICSD_Features/` are
-excluded from git.
-
 ## Public Modules
 
 ```python
@@ -558,6 +592,11 @@ from emd import (
 - Inspect `graphlet_build_manifest.json` and `graphlet_build_state.json` for
   completed, skipped, and failed CIF counts.
 
+## Authors
+
+Aaditya Panigrahi, Yanjun Liu, Omri Lesser, Krishnanand Mallayya, and Eun-Ah Kim
+(Department of Physics, Cornell University).
+
 ## Support
 
 For questions about this repository, the code, or the generated data, contact:
@@ -570,7 +609,7 @@ on the repository.
 
 ## Citing
 
-If you use this repository in published work, please cite:
+If you use this repository in published work, please cite the paper:
 
 A. Panigrahi, Y. Liu, O. Lesser, K. Mallayya, and E.-A. Kim,
 "Graphlet Histogram Representation Database of Inorganic Crystals",
@@ -588,9 +627,16 @@ arXiv:2606.10195 (2026). https://arxiv.org/abs/2606.10195
 }
 ```
 
+If you use the precomputed Graphlet-MP database, please also cite the dataset:
+
+A. Panigrahi, Y. Liu, O. Lesser, K. Mallayya, and E.-A. Kim,
+Graphlet-MP: Graphlet Histogram Representation Database of Inorganic Crystals,
+Zenodo (2026). https://doi.org/10.5281/zenodo.20532978
+
 Please also record the commit hash or version tag used to generate your
 results.
 
 ## License
 
-This project is distributed under the [MIT License](LICENSE).
+This project is distributed under the [MIT License](LICENSE), copyright (c) 2026
+Eun-Ah Kim Group, Cornell University.
