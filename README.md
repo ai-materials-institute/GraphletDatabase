@@ -558,6 +558,16 @@ from emd import (
 - Inspect `graphlet_build_manifest.json` and `graphlet_build_state.json` for
   completed, skipped, and failed CIF counts.
 
+## Support
+
+For questions about this repository, the code, or the generated data, contact:
+
+- **Aaditya Panigrahi** — ap2563@cornell.edu
+
+For bug reports and feature requests, please
+[open an issue](https://github.com/ai-materials-institute/GraphletDatabase/issues)
+on the repository.
+
 ## Citing
 
 The accompanying paper is in preparation. Once published, a full citation will
