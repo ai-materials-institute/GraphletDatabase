@@ -33,6 +33,5 @@ htmlcov/
 .coverage
 coverage.xml
 
-# Local agent metadata
-.agents/
-.codex/
+# Unused legacy config (not part of the release)
+config/Space_group.xls

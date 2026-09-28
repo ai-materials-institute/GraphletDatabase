@@ -70,11 +70,10 @@ src/
 config/
     atomic_radii.json
     Filtered_atomic_features.json
-    Space_group.xls
 
 LICENSE             MIT License
 pyproject.toml      Package metadata, dependencies, and console scripts
-requirements.txt    Unpinned dependency list for pip users (uv sync is preferred)
+requirements.txt    Exact dependency versions for reproducing the Graphlet-MP release
 ```
 
 ## Input Data
@@ -104,11 +103,19 @@ Alternatively, install into an existing environment with `pip`:
 pip install -e .
 ```
 
-The package requires Python ≥ 3.10. To pin explicitly with `uv`:
+To reproduce the published Graphlet-MP data exactly, install the pinned
+versions instead (Python 3.11):
 
 ```bash
-uv python install 3.10
-uv sync --python 3.10
+pip install -r requirements.txt
+pip install -e . --no-deps
+```
+
+The package requires Python ≥ 3.11. To pin explicitly with `uv`:
+
+```bash
+uv python install 3.11
+uv sync --python 3.11
 ```
 
 Check the environment:

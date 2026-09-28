@@ -1,6 +1,9 @@
-mendeleev
-numpy
-pot
-pymatgen
-scipy
-torch
+# Exact versions for reproducing the Graphlet-MP v1.0.0 release (Python 3.11).
+# For general use, `pip install -e .` installs compatible newer versions.
+mendeleev==1.1.0
+numpy==2.0.1
+pot==0.9.6.post1
+pymatgen==2025.10.7
+scipy==1.16.0
+spglib==2.6.0
+torch==2.5.1

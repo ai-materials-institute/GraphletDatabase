@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graphlet-featurization"
-version = "0.1.0"
+version = "1.0.0"
 description = "Graphlet-based crystal structure featurization utilities for CIF files."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
   {name = "Aaditya Panigrahi", email = "ap2563@cornell.edu"},
@@ -20,12 +20,12 @@ maintainers = [
   {name = "Aaditya Panigrahi", email = "ap2563@cornell.edu"},
 ]
 dependencies = [
-  "mendeleev",
-  "numpy",
-  "pot",
-  "pymatgen",
-  "scipy",
-  "torch",
+  "mendeleev>=1.1",
+  "numpy>=2.0",
+  "pot>=0.9.6",
+  "pymatgen>=2025.10.7",
+  "scipy>=1.16",
+  "torch>=2.5",
 ]
 keywords = ["materials-science", "cif", "graphlets", "featurization", "earth-mover-distance"]
 classifiers = [
@@ -33,7 +33,6 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Chemistry",
