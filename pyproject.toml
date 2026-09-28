@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-  {name = "Aaditya Panigrahi", email = "aadityaapanigrahi@gmail.com"},
+  {name = "Aaditya Panigrahi", email = "ap2563@cornell.edu"},
 ]
 dependencies = [
   "mendeleev",
