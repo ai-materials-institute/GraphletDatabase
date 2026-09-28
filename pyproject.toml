@@ -12,6 +12,14 @@ license = {text = "MIT"}
 authors = [
   {name = "Aaditya Panigrahi", email = "aadityaapanigrahi@gmail.com"},
 ]
+dependencies = [
+  "mendeleev",
+  "numpy",
+  "pot",
+  "pymatgen",
+  "scipy",
+  "torch",
+]
 keywords = ["materials-science", "cif", "graphlets", "featurization", "earth-mover-distance"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -28,14 +36,6 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/aadityapanigrahi/GraphletDatabase"
 Issues = "https://github.com/aadityapanigrahi/GraphletDatabase/issues"
-dependencies = [
-  "mendeleev",
-  "numpy",
-  "pot",
-  "pymatgen",
-  "scipy",
-  "torch",
-]
 
 [project.scripts]
 graphlet-featurization = "cli:main"

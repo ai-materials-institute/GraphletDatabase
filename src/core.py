@@ -1010,7 +1010,7 @@ def batch_build_graphlet_jsons(
     cif_paths: Sequence[str],
     *,
     graphlet_out_dir: str,
-    suffix: str = "_graphlets.json",
+    suffix: str = "_graphlet.json",
     atomic_radii_path: str = DEFAULT_ATOMIC_RADII_JSON,
     atomic_features_path: str = DEFAULT_ATOMIC_FEATURES_JSON,
     include_compact_features: bool = True,
@@ -1026,7 +1026,7 @@ def batch_build_graphlet_jsons(
         Directory where graphlet JSON files are written.
     suffix : str, optional
         Filename suffix appended to each CIF stem. Default is
-        ``"_graphlets.json"``.
+        ``"_graphlet.json"``.
     atomic_radii_path : str, optional
         JSON file containing element radii.
     atomic_features_path : str, optional
