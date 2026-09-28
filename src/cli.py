@@ -7,9 +7,13 @@ This module defines parser factories and thin command wrappers for the
 folder-based graphlet build, one-command graphlet pipeline, CSV-driven
 histogram workflow, and compact CIF-to-histogram workflow exposed by
 ``pyproject.toml`` console scripts.
+
+Author: Aaditya Panigrahi
 """
 
 from __future__ import annotations
+
+__author__ = "Aaditya Panigrahi"
 
 import argparse
 import json

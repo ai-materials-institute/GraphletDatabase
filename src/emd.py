@@ -5,9 +5,13 @@ This module converts graphlet histogram payloads into tensor form, computes
 Wasserstein-1 distances per histogram channel, reduces per-channel distances
 to scalar material distances, and builds summed exponential kernels from EMD
 distance matrices.
+
+Author: Aaditya Panigrahi
 """
 
 from __future__ import annotations
+
+__author__ = "Aaditya Panigrahi"
 
 import json
 import math

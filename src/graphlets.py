@@ -1,34 +1,27 @@
 """
-Graphlet feature extraction and fixed-bin histogramming (nearest-center)
-=======================================================================
+Graphlet feature extraction and fixed-bin histogramming.
 
-This module provides three main components:
+This module builds local structural graphlets from crystal structures and
+aggregates their features into histograms. It provides three main components:
 
-- Create_Graphlets
-    Builds local structural "graphlets" (1-, 2-, and 3-site) from a
-    `pymatgen` Structure and derives per-graphlet feature dictionaries
-    using an `atomic_features_dict`.
+- ``Create_Graphlets``
+    Builds 1-, 2-, and 3-site graphlets from a ``pymatgen`` Structure and
+    derives per-graphlet feature dictionaries using an ``atomic_features_dict``.
 
-- Graphlet_Analyzer
-    Generates data-driven histograms for graphlet features using
-    estimated bin widths (Freedman-Diaconis with Sturges fallback)
-    and returns both per-bin features and "magpie-like" mean/std features.
+- ``Graphlet_Analyzer``
+    Generates data-driven histograms for graphlet features using estimated
+    bin widths (Freedman-Diaconis with Sturges fallback) and returns both
+    per-bin features and "magpie-like" mean/std features.
 
-- Graphlet_AnalyzerFixedBins2D
-    Aggregates graphlet features into histograms using predefined bin
-    centers (shape: n_features x n_bins) with a nearest-center counting
-    rule. The public interface mirrors the original analyzer.
+- ``Graphlet_AnalyzerFixedBins2D``
+    Aggregates graphlet features into histograms using predefined bin centers
+    (shape ``(n_features, n_bins)``) with a nearest-center counting rule. The
+    public interface mirrors ``Graphlet_Analyzer``.
 
-Notes
------
-- All function and attribute names are preserved exactly as provided.
-- Only docstrings and non-functional comments were edited for clarity.
-- No executable logic was changed.
-
-Author
-------
-Krishnanada Mallaya, Yanjun Liu
+Author: Aaditya Panigrahi, Krishnanand Mallayya, Yanjun Liu
 """
+
+__author__ = "Aaditya Panigrahi, Krishnanand Mallayya, Yanjun Liu"
 
 import re
 from collections import Counter, defaultdict
@@ -44,6 +37,7 @@ class Create_Graphlets:
     Create graphlets (local structural features) from a CIF/Structure.
 
     The graphlets include:
+
     - 1-site graphlets: unique site compositions and counts.
     - 2-site graphlets: bonded pairs with distances and counts.
     - 3-site graphlets: triplets with distances and angles, plus counts.
@@ -55,6 +49,9 @@ class Create_Graphlets:
     atomic_radii : dict or None, optional
         Mapping of element symbol to atomic radius (pm). If None,
         radii are derived from `mendeleev`.
+    min_voronoi_weight : float, optional
+        Minimum Voronoi face weight used to keep neighbor contacts.
+        Default is ``1e-2``.
 
     Attributes
     ----------
@@ -62,6 +59,8 @@ class Create_Graphlets:
         Primitive reduced structure.
     atomic_radii : dict
         Element -> radius (pm).
+    min_voronoi_weight : float
+        Minimum Voronoi face weight used to keep neighbor contacts.
     neighb_data : dict
         Per-site neighbor information built by `get_neighbors`.
     one_site_graphlets : list of dict
@@ -95,10 +94,6 @@ class Create_Graphlets:
         min_voronoi_weight : float, optional
             Minimum Voronoi face weight used to keep neighbor contacts.
             Default is ``1e-2``.
-
-        Returns
-        -------
-        None
         """
         prim_structure=cif_structure.get_primitive_structure() # so we only worry about the smallest unit cell
         self.structure = prim_structure
@@ -183,16 +178,11 @@ class Create_Graphlets:
         """
         Find nearest neighbors for each site using Voronoi tessellation.
 
-        Notes
-        -----
-        Raw Voronoi neighbors are first filtered by a minimum Voronoi face
-        weight to reject nearly-vanishing periodic contacts before applying
-        the distance-based bond cutoff.
-
         Returns
         -------
         dict
             Mapping site index -> dict with:
+
             - 'site_composition' : dict
             - 'site_label' : str
             - 'site_coords' : array-like
@@ -207,6 +197,12 @@ class Create_Graphlets:
         ------
         ValueError
             If any neighbor distance is below 1 Å.
+
+        Notes
+        -----
+        Raw Voronoi neighbors are first filtered by a minimum Voronoi face
+        weight to reject nearly-vanishing periodic contacts before applying
+        the distance-based bond cutoff.
         """
         voronoi_nn = VoronoiNN()
 
@@ -268,19 +264,19 @@ class Create_Graphlets:
         """
         Generate 1-site graphlets.
 
-        Notes
-        -----
-        For each unique site composition, a graphlet is created with a count.
+        Attributes
+        ----------
+        self.one_site_graphlets : list of dict
+            Populated with 1-site graphlet records.
 
         Returns
         -------
         None
             Results are stored on ``self.one_site_graphlets``.
 
-        Attributes
-        ----------
-        self.one_site_graphlets : list of dict
-            Populated with 1-site graphlet records.
+        Notes
+        -----
+        For each unique site composition, a graphlet is created with a count.
         """
         all_sites = defaultdict(dict)
         seen_sites = set()
@@ -309,21 +305,21 @@ class Create_Graphlets:
         """
         Generate 2-site graphlets (bonded pairs).
 
-        Notes
-        -----
-        For each central-neighbor pair within the bond cutoff, record the
-        compositions, the distance, and the aggregated count keyed by
-        (sorted labels, rounded distance).
+        Attributes
+        ----------
+        self.two_site_graphlets : list of dict
+            Populated with 2-site graphlet records.
 
         Returns
         -------
         None
             Results are stored on ``self.two_site_graphlets``.
 
-        Attributes
-        ----------
-        self.two_site_graphlets : list of dict
-            Populated with 2-site graphlet records.
+        Notes
+        -----
+        For each central-neighbor pair within the bond cutoff, record the
+        compositions, the distance, and the aggregated count keyed by
+        (sorted labels, rounded distance).
         """
         all_pairs = defaultdict(dict)
         seen_pairs = set()
@@ -366,22 +362,22 @@ class Create_Graphlets:
         """
         Generate 3-site graphlets (triplets).
 
-        Notes
-        -----
-        For each center site, all unordered neighbor pairs form a triplet.
-        Distances and angles are computed; three distances and three angles
-        are sorted. A coarse angle bucket (round(angle_jk / 10) * 10) is
-        used in the triplet key. Counts are aggregated over unique keys.
+        Attributes
+        ----------
+        self.three_site_graphlets : list of dict
+            Populated with 3-site graphlet records.
 
         Returns
         -------
         None
             Results are stored on ``self.three_site_graphlets``.
 
-        Attributes
-        ----------
-        self.three_site_graphlets : list of dict
-            Populated with 3-site graphlet records.
+        Notes
+        -----
+        For each center site, all unordered neighbor pairs form a triplet.
+        Distances and angles are computed; three distances and three angles
+        are sorted. A coarse angle bucket, ``round(angle_jk / 10) * 10``, is
+        used in the triplet key. Counts are aggregated over unique keys.
         """
         def calculate_angle(vector1, vector2):
             """
@@ -496,12 +492,7 @@ class Create_Graphlets:
         ----------
         atomic_features_dict : dict
             Mapping element symbol -> dict of scalar properties.
-            Example: {'Fe': {'Z': 26, 'radius': 126, ...}, ...}
-
-        Returns
-        -------
-        None
-            Results are stored on graphlet feature attributes.
+            For example, ``{'Fe': {'Z': 26, 'radius': 126, ...}, ...}``.
 
         Attributes
         ----------
@@ -511,6 +502,11 @@ class Create_Graphlets:
             Two-site feature values by feature name, when available.
         self.three_site_features : dict
             Three-site feature values by feature name, when available.
+
+        Returns
+        -------
+        None
+            Results are stored on graphlet feature attributes.
         """
         feat_names=list(list(atomic_features_dict.values())[0].keys())     
 
@@ -975,10 +971,6 @@ class Graphlet_Analyzer:
             Scale factor applied to estimated bin widths. Default is 1.0.
         hist_density : bool, optional
             If True, normalize histograms to density. Default is False.
-
-        Returns
-        -------
-        None
         """
         self.graphlet_list=graphlet_list
         self.max_order=max_order
@@ -1277,10 +1269,6 @@ class Graphlet_AnalyzerFixedBins2D:
         strict : bool, optional
             If True, raise when feature coverage is incomplete. Default is
             False.
-
-        Returns
-        -------
-        None
 
         Raises
         ------

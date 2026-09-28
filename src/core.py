@@ -12,9 +12,13 @@ Notes
 The public workflow functions write JSON artifacts rather than pickles so that
 long-running featurization jobs can be inspected, resumed, and consumed by
 downstream distance or kernel routines.
+
+Author: Aaditya Panigrahi
 """
 
 from __future__ import annotations
+
+__author__ = "Aaditya Panigrahi"
 
 import concurrent.futures as cf
 import csv
@@ -103,6 +107,7 @@ def _ensure_parent(path: str | os.PathLike[str]) -> None:
     Returns
     -------
     None
+        The parent directory is created as a side effect.
     """
     Path(resolve_path(path)).parent.mkdir(parents=True, exist_ok=True)
 
@@ -143,10 +148,6 @@ class ProgressLogger:
         ----------
         log_path : str or os.PathLike or None, optional
             Destination log file. If None, messages are only printed.
-
-        Returns
-        -------
-        None
         """
         self.log_path = resolve_path(log_path) if log_path else None
         if self.log_path:
@@ -164,6 +165,7 @@ class ProgressLogger:
         Returns
         -------
         None
+            The message is written to stdout and, if configured, the log file.
         """
         line = f"[{timestamp()}] {message}"
         print(line, flush=True)
@@ -1541,6 +1543,7 @@ def _histogram_worker_init(bin_centers_path: str, build_settings: Dict[str, Any]
     Returns
     -------
     None
+        The loaded bin payload and settings are stored in module globals.
     """
     global _HISTOGRAM_WORKER_BIN_PAYLOAD
     global _HISTOGRAM_WORKER_BUILD_SETTINGS
@@ -1710,6 +1713,35 @@ def run_graphlet_histogram_build(
         total_items: int | None = None,
         failures: list[dict[str, str]] | None = None,
     ) -> None:
+        """
+        Write the live histogram-build state JSON.
+
+        Parameters
+        ----------
+        status : str
+            Overall build status, for example ``"starting"`` or ``"running"``.
+        phase : str
+            Name of the current build phase.
+        num_written : int, optional
+            Histograms written so far. Default is 0.
+        num_skipped : int, optional
+            Histograms skipped because a compatible output already exists.
+            Default is 0.
+        num_failed : int, optional
+            Histograms that failed. Default is 0.
+        current_index : int, optional
+            Items completed in the current phase. Default is 0.
+        total_items : int or None, optional
+            Items in the current phase. If None, the number of graphlet JSONs
+            is used.
+        failures : list of dict or None, optional
+            Failure records; the most recent 50 are written.
+
+        Returns
+        -------
+        None
+            The state is written atomically to ``state_path``.
+        """
         elapsed_s = time.time() - start_epoch
         total = len(graphlet_paths) if total_items is None else int(total_items)
         completed = int(current_index)
@@ -1831,6 +1863,23 @@ def run_graphlet_histogram_build(
         logger.log(f"Resume-compatible histograms skipped before submission: {len(skipped_paths)}")
 
     def _handle_histogram_result(result: Dict[str, Any], completed_count: int) -> bool:
+        """
+        Record one histogram worker result and report progress.
+
+        Parameters
+        ----------
+        result : dict
+            Worker result with an ``"ok"`` flag and either ``"out_path"`` or
+            the error details.
+        completed_count : int
+            Number of histogram jobs completed so far, including this one.
+
+        Returns
+        -------
+        bool
+            False when the result is a failure and ``fail_fast`` is set, so the
+            build should stop; True otherwise.
+        """
         if result.get("ok"):
             histogram_paths.append(str(result["out_path"]))
             rebuilt_paths.append(str(result["out_path"]))
